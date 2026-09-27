@@ -1,0 +1,57 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'cn.workbuddy.orb'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "cn.workbuddy.orb"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            def ks = rootProject.file("orb.jks")
+            if (ks.exists()) {
+                storeFile ks
+                storePassword(System.getenv("ORB_STORE_PASS") ?: "orb1234")
+                keyAlias(System.getenv("ORB_ALIAS") ?: "orb")
+                keyPassword(System.getenv("ORB_KEY_PASS") ?: "orb1234")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // 有 keystore 就用正式签名，没有就退回 debug 签名（保证装得上）
+            if (rootProject.file("orb.jks").exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // 零第三方依赖：只用系统 API，构建快、体积小
+}

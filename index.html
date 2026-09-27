@@ -1,0 +1,2942 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>
+/* ===== 原生桥接前奏：让网页里的提醒变成真正的系统通知 ===== */
+(function () {
+  var KEY = 'ptb.state.v1';
+  function has(k) { return !!(window.OrbNative && typeof window.OrbNative[k] === 'function'); }
+
+  /* 1) 打开 App 时把上次的任务快照还给网页 */
+  try {
+    if (has('getTasksJson') && !localStorage.getItem(KEY)) {
+      var t = window.OrbNative.getTasksJson();
+      if (t && t.length > 4) localStorage.setItem(KEY, t);
+    }
+  } catch (e) {}
+
+  /* 2) 每次保存都同步给原生，原生据此排精确闹钟 */
+  var _set = null;
+  try { _set = Storage.prototype.setItem; } catch (e) {}
+  if (_set) {
+    Storage.prototype.setItem = function (k, v) {
+      try { _set.call(this, k, v); } catch (e) {}
+      if (k === KEY) { try { if (has('saveTasks')) window.OrbNative.saveTasks(v); } catch (e) {} }
+    };
+  }
+
+  /* 3) 用系统通知渠道替换浏览器通知（没授权时保留原来的应用内横幅） */
+  try {
+    function OrbNotification(title, opts) {
+      opts = opts || {};
+      try { if (has('notify')) window.OrbNative.notify(String(title || ''), String(opts.body || ''), opts.orbKind || 'normal'); } catch (e) {}
+    }
+    OrbNotification.requestPermission = function (cb) {
+      var p = 'denied';
+      try { p = (has('hasNotifPermission') && window.OrbNative.hasNotifPermission()) ? 'granted' : 'denied'; } catch (e) {}
+      if (p === 'denied' && has('openPermissionSettings')) { try { window.OrbNative.openPermissionSettings(); } catch (e) {} }
+      if (cb) cb(p);
+      return Promise.resolve(p);
+    };
+    Object.defineProperty(OrbNotification, 'permission', {
+      get: function () {
+        try { return (has('hasNotifPermission') && window.OrbNative.hasNotifPermission()) ? 'granted' : 'denied'; }
+        catch (e) { return 'denied'; }
+      }
+    });
+    if (OrbNotification.permission === 'granted') window.Notification = OrbNotification;
+  } catch (e) {}
+
+  /* 4) 给网页用的：让悬浮光球变色 */
+  window.__orbPing = function (kind) { try { if (has('ping')) window.OrbNative.ping(kind || 'warn'); } catch (e) {} };
+  window.__orbOrb = {
+    start: function () { try { if (has('startOrb')) window.OrbNative.startOrb(); } catch (e) {} },
+    stop: function () { try { if (has('stopOrb')) window.OrbNative.stopOrb(); } catch (e) {} },
+    hide: function () { try { if (has('collapseOrb')) window.OrbNative.collapseOrb(); } catch (e) {} }
+  };
+})();
+</script>
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F0F2F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B0D12" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>团仔 · 桌宠任务管家</title>
+<style>
+/* 团仔 · 桌宠任务管家 —— Meta 风格 UI（亮色为主，夜间自动深色） */
+:root{
+  /* Meta 系主色 */
+  --blue:#0064E0;
+  --blue-2:#1877F2;
+  --blue-soft:#E7F0FF;
+  --grad:linear-gradient(135deg,#0064E0 0%,#5B4BFF 100%);
+  --ig:linear-gradient(135deg,#F58529 0%,#DD2A7B 42%,#8134AF 72%,#515BD4 100%);
+  --ok:#1DB954;
+  --warn:#F5A623;
+  --danger:#FA383E;
+
+  --bg:#F0F2F5;
+  --surface:#FFFFFF;
+  --surface-2:#F5F6F8;
+  --field:#EFF1F4;
+  --line:rgba(0,0,0,.09);
+  --text:#1C1E21;
+  --dim:#666A70;
+
+  --r-lg:24px;
+  --r-md:18px;
+  --r-sm:12px;
+  --shadow-1:0 1px 2px rgba(0,0,0,.06),0 6px 16px rgba(0,0,0,.07);
+  --shadow-2:0 4px 12px rgba(0,0,0,.08),0 18px 40px rgba(0,0,0,.12);
+  --shadow-blue:0 6px 18px rgba(0,100,224,.32);
+  color-scheme:light dark;
+
+  /* 光球配色（随情绪变化） */
+  --orb-a:#0064E0;
+  --orb-b:#7B61FF;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0B0D12;
+    --surface:#171A21;
+    --surface-2:#1F232C;
+    --field:#22262F;
+    --line:rgba(255,255,255,.1);
+    --text:#E9EBF0;
+    --dim:#9AA0AB;
+    --blue-soft:#14294a;
+    --shadow-1:0 1px 2px rgba(0,0,0,.4),0 8px 20px rgba(0,0,0,.35);
+    --shadow-2:0 8px 24px rgba(0,0,0,.5),0 24px 48px rgba(0,0,0,.45);
+  }
+}
+
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",Roboto,sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(900px 500px at 12% -8%,rgba(0,100,224,.16),transparent 60%),
+    radial-gradient(700px 480px at 100% 8%,rgba(123,47,247,.16),transparent 58%),
+    var(--bg);
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+  -webkit-text-size-adjust:100%;
+}
+button{font-family:inherit;touch-action:manipulation}
+input,select,textarea{font-family:inherit;touch-action:manipulation}
+.bg-deco{display:none}
+
+/* ==================== 光球桌宠 ==================== */
+.pet-dock{
+  position:fixed;z-index:70;right:18px;bottom:calc(18px + env(safe-area-inset-bottom,0px));
+  display:flex;flex-direction:column;align-items:flex-end;gap:10px;
+  user-select:none;-webkit-user-select:none;touch-action:none;
+  transition:right .32s cubic-bezier(.3,1,.4,1),bottom .32s cubic-bezier(.3,1,.4,1);
+}
+/* 点击区域（.pet-stage）保持静止，浮动只作用在内层 SVG 上 —— 手指/自动化都好点 */
+.pet-stage{
+  position:relative;width:126px;height:126px;cursor:grab;
+  filter:drop-shadow(0 10px 22px rgba(0,0,0,.18));
+}
+.pet-stage:active{cursor:grabbing}
+@keyframes hoverY{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+.pet-svg{width:100%;height:100%;display:block;overflow:visible;animation:hoverY 5.2s ease-in-out infinite}
+#pet-stage img.pet-svg{object-fit:contain;transform-origin:50% 50%;filter:drop-shadow(0 6px 12px rgba(0,0,0,.14))}
+.pet-stage[data-mood="sleep"] img.pet-svg{opacity:.72;filter:saturate(.75) drop-shadow(0 4px 8px rgba(0,0,0,.12))}
+.pet-stage[data-mood="alert"] img.pet-svg{filter:drop-shadow(0 0 10px rgba(250,56,62,.45))}
+.pet-stage[data-mood="happy"] img.pet-svg{filter:drop-shadow(0 0 10px rgba(245,166,35,.4))}
+
+/* 情绪配色 */
+.pet-stage{--orb-a:#0064E0;--orb-b:#7B61FF}
+.pet-stage[data-mood="happy"]{--orb-a:#F5A623;--orb-b:#FF6B9D}
+.pet-stage[data-mood="alert"]{--orb-a:#FA383E;--orb-b:#FF8A3D}
+.pet-stage[data-mood="worry"]{--orb-a:#F5A623;--orb-b:#FF7A59}
+.pet-stage[data-mood="sleep"]{--orb-a:#3F51B5;--orb-b:#5C6BC0}
+.pet-stage[data-mood="focus"]{--orb-a:#5B4BFF;--orb-b:#00C2A8}
+
+.orb-core{transform-origin:60px 60px;animation:orbPulse 3.6s ease-in-out infinite}
+@keyframes orbPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06,1.04)}}
+.orb-halo{transform-origin:60px 60px;animation:halo 4.2s ease-in-out infinite;opacity:.55}
+.orb-halo-2{transform-origin:60px 60px;animation:halo 4.2s ease-in-out infinite -1.4s;opacity:.35}
+@keyframes halo{0%,100%{transform:scale(.92);opacity:.35}50%{transform:scale(1.12);opacity:.7}}
+.orb-ring{transform-origin:60px 60px;animation:spin 7s linear infinite;stroke-linecap:round}
+.orb-ring-2{animation:spin 11s linear infinite reverse;opacity:.45}
+@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+.orb-shine{animation:shine 5s ease-in-out infinite}
+@keyframes shine{0%,100%{opacity:.34;transform:translate(0,0)}50%{opacity:.5;transform:translate(2px,2px)}}
+.orb-sparks{animation:spin 12s linear infinite;transform-origin:60px 60px}
+.orb-sparks .sp{animation:flicker 2.4s ease-in-out infinite}
+.orb-sparks .sp2{animation-delay:.4s}
+.orb-sparks .sp3{animation-delay:.8s}
+.orb-sparks .sp4{animation-delay:1.2s}
+@keyframes flicker{0%,100%{opacity:.25}50%{opacity:.95}}
+.pet-stage[data-mood="happy"] .orb-core{animation:orbPulse 3.6s ease-in-out infinite,hop .6s ease 2}
+@keyframes hop{0%{transform:translateY(0) scale(1)}35%{transform:translateY(-10px) scale(.95,1.05)}70%{transform:translateY(0) scale(1.05,.95)}100%{transform:translateY(0) scale(1)}}
+.pet-stage[data-mood="alert"] .orb-core{animation:shake .45s ease 3}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+.pet-stage[data-mood="sleep"] .orb-core{animation:orbPulse 6s ease-in-out infinite}
+
+/* 表情切换 */
+.eyes{display:none}
+.pet-stage[data-mood="idle"] .eyes-open,
+.pet-stage[data-mood="happy"] .eyes-open,
+.pet-stage[data-mood="focus"] .eyes-open{display:block}
+.pet-stage[data-mood="worry"] .eyes-worry{display:block}
+.pet-stage[data-mood="alert"] .eyes-worry{display:block}
+.pet-stage[data-mood="sleep"] .eyes-closed{display:block}
+.pet-stage.blinking .eyes-open{display:none}
+.pet-stage.blinking .eyes-closed{display:block}
+.mouth{display:none}
+.pet-stage[data-mood="idle"] .mouth-flat,
+.pet-stage[data-mood="focus"] .mouth-flat,
+.pet-stage[data-mood="worry"] .mouth-flat{display:block}
+.pet-stage[data-mood="happy"] .mouth-smile{display:block}
+.pet-stage[data-mood="alert"] .mouth-oh{display:block}
+.pet-stage[data-mood="sleep"] .mouth-smile{display:block}
+.zzz{display:none}
+.pet-stage[data-mood="sleep"] .zzz{display:block}
+.zzz text{fill:var(--dim);font-weight:800;font-family:inherit}
+.tail{transform-box:fill-box;transform-origin:0% 100%;animation:tailWag 3s ease-in-out infinite}
+.pet-stage[data-mood="happy"] .tail{animation:tailWag 1.1s ease-in-out infinite}
+.pet-stage[data-mood="sleep"] .tail{animation:none}
+@keyframes tailWag{0%,100%{transform:rotate(0deg)}50%{transform:rotate(-9deg)}}
+.z1{font-size:13px;animation:zfloat 2.4s ease-in-out infinite}
+.z2{font-size:16px;animation:zfloat 2.4s ease-in-out infinite .3s}
+.z3{font-size:20px;animation:zfloat 2.4s ease-in-out infinite .6s}
+@keyframes zfloat{0%{opacity:0;transform:translateY(6px)}40%{opacity:.9}100%{opacity:0;transform:translateY(-10px)}}
+
+.pet-badge{
+  position:absolute;top:4px;right:4px;min-width:24px;height:24px;padding:0 7px;
+  border-radius:12px;background:var(--danger);color:#fff;font-size:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;border:2px solid var(--surface);
+  box-shadow:0 4px 10px rgba(250,56,62,.4)
+}
+.hidden{display:none !important}
+
+/* 气泡：Messenger 风格 */
+.bubble{position:relative;max-width:min(290px,72vw);animation:bubbleIn .3s cubic-bezier(.2,1.25,.4,1)}
+@keyframes bubbleIn{from{opacity:0;transform:translateY(12px) scale(.92)}to{opacity:1;transform:none}}
+.bubble-inner{
+  background:var(--surface);color:var(--text);
+  padding:13px 15px;border-radius:20px 20px 6px 20px;box-shadow:var(--shadow-2);
+  font-size:14.5px;line-height:1.6;border:1px solid var(--line);
+}
+.bubble-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+.bubble-actions button{
+  border:0;border-radius:999px;padding:9px 14px;font-size:13px;cursor:pointer;min-height:38px;
+  background:var(--blue-soft);color:var(--blue);font-weight:700
+}
+.bubble-actions button.ghost{background:var(--surface-2);color:var(--dim);font-weight:600}
+.bubble-x{
+  position:absolute;top:-8px;right:-8px;width:26px;height:26px;border-radius:50%;
+  border:0;background:var(--surface);color:var(--dim);cursor:pointer;font-size:16px;line-height:1;
+  box-shadow:var(--shadow-1);border:1px solid var(--line)
+}
+.pet-toolbar{display:flex;gap:8px}
+.pt-btn{
+  width:42px;height:42px;border-radius:50%;border:0;cursor:pointer;font-size:17px;
+  background:var(--surface);color:var(--text);box-shadow:var(--shadow-1);border:1px solid var(--line)
+}
+.pt-btn:active{transform:scale(.93)}
+
+/* ==================== 面板 ==================== */
+.panel{
+  position:fixed;z-index:60;top:14px;right:14px;bottom:14px;width:404px;max-width:calc(100vw - 20px);
+  background:var(--surface);border-radius:26px;box-shadow:var(--shadow-2);border:1px solid var(--line);
+  display:flex;flex-direction:column;overflow:hidden;
+  transform:translateX(0);transition:transform .32s cubic-bezier(.3,1,.4,1),opacity .28s;
+}
+.panel.collapsed{transform:translateX(calc(100% + 30px));opacity:0;pointer-events:none}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 16px 10px;background:var(--surface)}
+.pet-mini{display:flex;gap:11px;align-items:center;min-width:0}
+.pet-mini .avatar{
+  width:42px;height:42px;border-radius:50%;flex:0 0 42px;
+  background:radial-gradient(circle at 36% 30%, #ffffff 0%, var(--orb-b) 42%, var(--orb-a) 100%);
+  box-shadow:var(--shadow-blue);position:relative;transition:background .3s
+}
+.pet-mini .avatar::after{
+  content:"";position:absolute;inset:-5px;border-radius:50%;
+  border:2px solid var(--orb-b);opacity:.35;animation:pulseRing 2s ease-in-out infinite
+}
+.pet-mini .avatar[data-mood="idle"]{--orb-a:#0064E0;--orb-b:#7B61FF}
+.pet-mini .avatar[data-mood="happy"]{--orb-a:#F5A623;--orb-b:#FF6B9D}
+.pet-mini .avatar[data-mood="alert"]{--orb-a:#FA383E;--orb-b:#FF8A3D}
+.pet-mini .avatar[data-mood="worry"]{--orb-a:#F5A623;--orb-b:#FF7A59}
+.pet-mini .avatar[data-mood="sleep"]{--orb-a:#3F51B5;--orb-b:#5C6BC0}
+.pet-mini .avatar[data-mood="focus"]{--orb-a:#5B4BFF;--orb-b:#00C2A8}
+#pet-mini-face{font-size:20px;line-height:1}
+.panel-title{font-weight:800;font-size:16.5px;letter-spacing:.2px}
+.panel-sub{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.head-actions{display:flex;align-items:center;gap:9px;flex:0 0 auto}
+.conn-dot{width:10px;height:10px;border-radius:50%;background:var(--dim)}
+.conn-dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(29,185,84,.18)}
+.conn-dot.err{background:var(--danger);box-shadow:0 0 0 3px rgba(250,56,62,.18)}
+.icon-btn{width:34px;height:34px;border-radius:12px;border:1px solid var(--line);background:var(--surface-2);color:var(--text);font-size:19px;cursor:pointer;line-height:1}
+
+/* Segmented control（Meta 风格） */
+.tabs{display:flex;gap:4px;margin:2px 14px 8px;padding:4px;background:var(--surface-2);border-radius:14px}
+.tab{
+  flex:1;border:0;background:transparent;color:var(--dim);padding:9px 0;border-radius:11px;
+  font-size:13.5px;cursor:pointer;font-weight:700;min-height:38px;transition:.2s
+}
+.tab.active{background:var(--surface);color:var(--blue);box-shadow:var(--shadow-1)}
+.tab-body{display:none;flex:1;min-height:0;overflow-y:auto;padding:0 14px calc(14px + env(safe-area-inset-bottom,0px));-webkit-overflow-scrolling:touch}
+.tab-body.active{display:flex;flex-direction:column;gap:11px;padding-top:4px}
+::-webkit-scrollbar{width:0;height:0}
+
+/* 对话 */
+.chat-log{flex:1;min-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;padding:4px 2px 4px 0}
+.msg{max-width:86%;padding:11px 14px;border-radius:20px;font-size:14px;line-height:1.62;white-space:pre-wrap;word-break:break-word}
+.msg.me{align-self:flex-end;background:var(--grad);color:#fff;border-bottom-right-radius:6px;box-shadow:var(--shadow-blue)}
+.msg.pet{align-self:flex-start;background:var(--surface-2);border:1px solid var(--line);border-bottom-left-radius:6px}
+.msg.sys{align-self:center;background:var(--surface-2);color:var(--dim);font-size:11.5px;text-align:center;border-radius:12px;padding:6px 10px}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{
+  border:1px solid var(--line);border-radius:999px;padding:9px 13px;font-size:12.5px;cursor:pointer;
+  background:var(--surface-2);color:var(--dim);font-weight:600;min-height:38px
+}
+.chip:active{transform:scale(.97)}
+.composer{display:flex;gap:9px;align-items:flex-end;padding-top:2px}
+.composer textarea{
+  flex:1;resize:none;max-height:120px;border-radius:20px;padding:12px 14px;font:inherit;font-size:14px;
+  background:var(--field);border:1px solid transparent;color:var(--text);outline:none;min-height:44px
+}
+.composer textarea:focus{border-color:var(--blue);background:var(--surface)}
+.send-btn{
+  border:0;border-radius:20px;padding:0 18px;min-height:44px;cursor:pointer;font-weight:700;color:#fff;
+  background:var(--grad);box-shadow:var(--shadow-blue);font-size:14px
+}
+.send-btn[disabled]{opacity:.5}
+
+/* 任务 */
+.quick-form{display:flex;gap:9px}
+.quick-form input{
+  flex:1;border-radius:20px;padding:12px 14px;font:inherit;font-size:14px;min-height:44px;
+  background:var(--field);border:1px solid transparent;color:var(--text);outline:none
+}
+.quick-form input:focus{border-color:var(--blue);background:var(--surface)}
+.task-groups{display:flex;flex-direction:column;gap:6px}
+.group-title{font-size:12px;color:var(--dim);margin:8px 0 2px;font-weight:700;display:flex;align-items:center;gap:6px}
+.group-title b{color:var(--text);font-size:12px;background:var(--surface-2);border-radius:999px;padding:1px 8px}
+.task{
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);
+  padding:12px 13px;margin-bottom:9px;display:flex;gap:11px;align-items:flex-start;box-shadow:var(--shadow-1);transition:.18s
+}
+.task.done{opacity:.5}
+.task.overdue{border-color:rgba(250,56,62,.4);background:rgba(250,56,62,.05)}
+.task.doing{border-color:rgba(0,100,224,.4);background:rgba(0,100,224,.05)}
+.tick{
+  width:24px;height:24px;flex:0 0 24px;border-radius:8px;border:2px solid var(--dim);
+  background:transparent;cursor:pointer;margin-top:1px;display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:13px;transition:.15s
+}
+.task.done .tick{background:var(--ok);border-color:var(--ok)}
+.t-main{flex:1;min-width:0}
+.t-title{font-size:14.5px;font-weight:700;line-height:1.45}
+.task.done .t-title{text-decoration:line-through}
+.t-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;font-size:11.5px;color:var(--dim)}
+.m-chip{background:var(--surface-2);border-radius:8px;padding:3px 8px;font-weight:600}
+.m-chip.hot{background:rgba(250,56,62,.12);color:var(--danger)}
+.m-chip.soon{background:rgba(245,166,35,.16);color:#a4650a}
+.m-chip.ok{background:rgba(29,185,84,.14);color:#0d8f43}
+.t-ops{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+.t-op{
+  border:1px solid var(--line);background:var(--surface-2);color:var(--dim);border-radius:11px;
+  padding:8px 11px;font-size:12.5px;cursor:pointer;font-weight:600;min-height:36px
+}
+.t-op:active{transform:scale(.96)}
+.t-op.del{color:var(--danger)}
+.sub-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+.sub{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--dim);line-height:1.5}
+.sub.done{text-decoration:line-through;opacity:.55}
+.sub input{accent-color:var(--blue);width:17px;height:17px;margin-top:1px}
+.empty{text-align:center;color:var(--dim);font-size:13.5px;padding:30px 12px;line-height:1.75}
+
+/* 日程 */
+.plan-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;background:var(--surface-2);border-radius:var(--r-md);padding:13px}
+.plan-date{font-weight:800;font-size:15px}
+.plan-summary{font-size:12.5px;color:var(--dim);margin-top:4px;line-height:1.6}
+.timeline{display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);padding:12px}
+.tl-row{display:flex;gap:10px;align-items:stretch;min-height:28px}
+.tl-time{width:46px;flex:0 0 46px;font-size:11.5px;color:var(--dim);padding-top:6px;text-align:right;font-variant-numeric:tabular-nums}
+.tl-body{flex:1;border-left:2px solid var(--line);padding:2px 0 2px 12px}
+.tl-block{border-radius:12px;padding:8px 11px;font-size:13px;margin-bottom:5px;background:var(--blue-soft);border:1px solid rgba(0,100,224,.25);color:var(--text);font-weight:600}
+.tl-block.free{background:transparent;border:1px dashed var(--line);color:var(--dim);font-weight:500}
+.tl-block.now{background:var(--grad);color:#fff;border-color:transparent;box-shadow:var(--shadow-blue)}
+.focus-box{
+  display:flex;justify-content:space-between;align-items:center;gap:10px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);padding:14px;box-shadow:var(--shadow-1)
+}
+.focus-clock{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:1px;background:var(--ig);-webkit-background-clip:text;background-clip:text;color:transparent}
+.focus-label{font-size:12.5px;color:var(--dim);margin-top:3px;max-width:180px}
+.focus-right{display:flex;flex-direction:column;gap:7px;flex:0 0 auto}
+.primary-btn{border:0;border-radius:14px;padding:11px 16px;cursor:pointer;font-weight:700;color:#fff;background:var(--grad);box-shadow:var(--shadow-blue);min-height:42px;font-size:13.5px}
+.ghost-btn{
+  border:1px solid var(--line);background:var(--surface);color:var(--dim);border-radius:14px;
+  padding:10px 13px;cursor:pointer;font-size:13px;font-weight:600;min-height:42px
+}
+.ghost-btn:active{transform:scale(.97)}
+.ghost-btn.danger{color:var(--danger)}
+.plan-tools{display:flex;gap:8px;flex-wrap:wrap}
+
+/* 设置 */
+.set-group{
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);
+  padding:14px;display:flex;flex-direction:column;gap:12px;box-shadow:var(--shadow-1)
+}
+.set-title{font-size:12px;color:var(--dim);font-weight:800;letter-spacing:.6px}
+.field{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--dim)}
+.field span{font-size:12.5px;font-weight:600}
+.field input,.field select{
+  background:var(--field);border:1px solid transparent;color:var(--text);
+  border-radius:14px;padding:12px 13px;font:inherit;font-size:14px;outline:none;width:100%;min-height:46px
+}
+.field input:focus,.field select:focus{border-color:var(--blue);background:var(--surface)}
+.row{display:flex;gap:9px;align-items:center}
+.row.btns{flex-wrap:wrap}
+.sep{color:var(--dim);font-size:13px}
+.switch{display:flex;align-items:center;gap:11px;font-size:14px;cursor:pointer;min-height:44px}
+.switch input{
+  width:48px;height:28px;appearance:none;-webkit-appearance:none;background:#CDD0D5;border-radius:999px;
+  position:relative;cursor:pointer;transition:.22s;flex:0 0 48px;border:0
+}
+.switch input::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.22s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.switch input:checked{background:var(--blue)}
+.switch input:checked::after{transform:translateX(20px)}
+.hint{font-size:12px;color:var(--dim);line-height:1.65;margin:0}
+.api-status{font-size:12.5px;color:var(--dim);font-weight:600}
+.api-status.ok{color:var(--ok)}
+.api-status.err{color:var(--danger)}
+
+/* toast */
+.toast{
+  position:fixed;left:50%;bottom:calc(150px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(16px);
+  background:rgba(28,30,38,.94);color:#fff;padding:11px 18px;border-radius:14px;font-size:13.5px;
+  z-index:99;opacity:0;pointer-events:none;transition:.25s;max-width:82vw;text-align:center;box-shadow:var(--shadow-2)
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* 页内提醒横幅（系统通知不可用时的替身） */
+.banner{
+  position:fixed;z-index:95;left:12px;right:12px;top:calc(12px + env(safe-area-inset-top,0px));
+  background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow-2);
+  display:flex;gap:12px;align-items:flex-start;padding:14px;animation:bannerIn .32s cubic-bezier(.2,1.25,.4,1)
+}
+@keyframes bannerIn{from{opacity:0;transform:translateY(-16px) scale(.97)}to{opacity:1;transform:none}}
+.banner-orb{
+  width:42px;height:42px;flex:0 0 42px;border-radius:50%;background:var(--grad);
+  display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:var(--shadow-blue);
+  animation:pulseRing 1.6s ease-in-out infinite
+}
+@keyframes pulseRing{0%,100%{box-shadow:0 0 0 0 rgba(0,100,224,.35)}50%{box-shadow:0 0 0 10px rgba(0,100,224,0)}}
+.banner-body{flex:1;min-width:0}
+.banner-title{font-weight:800;font-size:14.5px}
+.banner-text{font-size:13px;color:var(--dim);margin-top:3px;line-height:1.55}
+.banner-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.banner-btn{
+  border:0;border-radius:999px;padding:9px 15px;min-height:38px;font-size:13px;font-weight:700;
+  background:var(--grad);color:#fff;cursor:pointer;box-shadow:var(--shadow-blue)
+}
+.banner-btn.ghost{background:var(--surface-2);color:var(--dim);box-shadow:none}
+.banner-x{border:0;background:transparent;color:var(--dim);font-size:18px;cursor:pointer;line-height:1;width:28px;height:28px;flex:0 0 28px}
+
+.pet-dock.dragging .pet-svg{animation:none}
+
+/* ==================== 移动端（荣耀 / Android） ==================== */
+@media (max-width:640px){
+  .panel{
+    top:auto;right:8px;left:8px;bottom:8px;width:auto;height:70vh;
+    border-radius:28px 28px 22px 22px;
+  }
+  .panel.collapsed{transform:translateY(calc(100% + 24px));opacity:0}
+  .panel-head{padding:14px 14px 8px}
+  .panel-title{font-size:17px}
+  .tab{font-size:14px;padding:11px 0;min-height:44px}
+  .tab-body{padding:0 14px calc(16px + env(safe-area-inset-bottom,0px))}
+  .msg{font-size:14.5px;max-width:90%}
+  .task{padding:13px}
+  .t-op{padding:9px 12px;font-size:13px;min-height:38px}
+  /* 面板打开时光球上移到面板上方，避免互相遮挡、也不挡住底部按钮 */
+  body.panel-open .pet-dock{right:14px;bottom:calc(70vh + 14px)}
+  .pet-stage{width:104px;height:104px}
+  .pt-btn{width:40px;height:40px}
+  .bubble{max-width:min(300px,78vw)}
+  .composer textarea,.quick-form input{font-size:15px}
+  .toast{bottom:calc(120px + env(safe-area-inset-bottom,0px))}
+}
+@media (max-width:380px){
+  .pet-stage{width:92px;height:92px}
+  .panel{height:74vh}
+  body.panel-open .pet-dock{bottom:calc(74vh + 12px)}
+}
+/* 桌面端：面板打开时给光球让位 */
+@media (min-width:641px){
+  body.panel-open .pet-dock{right:436px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none !important;transition:none !important}
+}
+
+</style>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='36' r='22' fill='%23ffd166'/><circle cx='23' cy='32' r='4' fill='%23222'/><circle cx='41' cy='32' r='4' fill='%23222'/><path d='M14 22l4 10 6-8z' fill='%23ffd166'/><path d='M50 22l-4 10-6-8z' fill='%23ffd166'/></svg>">
+</head>
+<body class="panel-open">
+
+<div class="bg-deco" aria-hidden="true"><span></span><span></span><span></span></div>
+
+<!-- ======================= 桌宠 ======================= -->
+<div id="pet-dock" class="pet-dock">
+  <div id="bubble" class="bubble hidden">
+    <div class="bubble-inner">
+      <span id="bubble-text"></span>
+      <div id="bubble-actions" class="bubble-actions"></div>
+    </div>
+    <button id="bubble-close" class="bubble-x" title="关闭">×</button>
+  </div>
+
+  <div id="pet-stage" class="pet-stage" data-mood="idle" title="点我说话 / 拖动我">
+    <img src="pet.png" class="pet-svg orb-core" alt="桌宠" draggable="false">
+    <div id="pet-badge" class="pet-badge hidden">0</div>
+  </div>
+
+  <div class="pet-toolbar">
+    <button id="pet-mic" class="pt-btn" title="语音说话" aria-label="语音开关">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+    </button>
+    <button id="pet-panel" class="pt-btn" title="打开面板" aria-label="打开面板">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3 8.8 8.8 0 0 1-3.2-.6L4 21l1.8-4.9A8.2 8.2 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3.2 8.4 8.4 0 0 1 21 11.5z" fill="currentColor" stroke="none"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- ======================= 主面板 ======================= -->
+<aside id="panel" class="panel">
+  <header class="panel-head">
+    <div class="pet-mini">
+      <div class="avatar" data-mood="idle"></div>
+      <div>
+        <div id="panel-title" class="panel-title">团仔</div>
+        <div id="panel-sub" class="panel-sub">今天也一起把事情做完吧</div>
+      </div>
+    </div>
+    <div class="head-actions">
+      <span id="conn-dot" class="conn-dot" title="AI 连接状态"></span>
+      <button id="panel-close" class="icon-btn" title="收起面板">×</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="chat" role="tab">对话</button>
+    <button class="tab" data-tab="tasks" role="tab">任务</button>
+    <button class="tab" data-tab="plan" role="tab">日程</button>
+    <button class="tab" data-tab="settings" role="tab">设置</button>
+  </nav>
+
+  <!-- ---------- 对话 ---------- -->
+  <section class="tab-body active" data-body="chat">
+    <div id="chat-log" class="chat-log"></div>
+    <div id="chips" class="chips">
+      <button class="chip" data-cmd="plan">帮我排今天的日程</button>
+      <button class="chip" data-cmd="review">今天进展怎么样</button>
+      <button class="chip" data-cmd="stuck">我卡住了</button>
+      <button class="chip" data-cmd="checkin">录入今天待办</button>
+    </div>
+    <form id="chat-form" class="composer">
+      <textarea id="chat-input" rows="1" placeholder="说点什么…（可直接把待办一口气丢给我）"></textarea>
+      <button type="submit" id="chat-send" class="send-btn">发送</button>
+    </form>
+  </section>
+
+  <!-- ---------- 任务 ---------- -->
+  <section class="tab-body" data-body="tasks">
+    <form id="quick-form" class="quick-form">
+      <input id="quick-input" type="text" placeholder="自然语言添加：明天18点前交周报，大概40分钟">
+      <button type="submit" class="send-btn">添加</button>
+    </form>
+    <div id="task-groups" class="task-groups"></div>
+  </section>
+
+  <!-- ---------- 日程 ---------- -->
+  <section class="tab-body" data-body="plan">
+    <div class="plan-head">
+      <div>
+        <div id="plan-date" class="plan-date"></div>
+        <div id="plan-summary" class="plan-summary"></div>
+      </div>
+      <button id="btn-replan" class="ghost-btn">重新排程</button>
+    </div>
+    <div id="timeline" class="timeline"></div>
+    <div class="focus-box">
+      <div class="focus-left">
+        <div id="focus-clock" class="focus-clock">25:00</div>
+        <div id="focus-label" class="focus-label">专注中：未开始</div>
+      </div>
+      <div class="focus-right">
+        <button id="btn-focus" class="primary-btn">开始专注</button>
+        <button id="btn-focus-stop" class="ghost-btn">停止</button>
+      </div>
+    </div>
+    <div class="plan-tools">
+      <button id="btn-export-ics" class="ghost-btn">导出 .ics 到日历</button>
+      <button id="btn-test-notify" class="ghost-btn">测试通知</button>
+    </div>
+  </section>
+
+  <!-- ---------- 设置 ---------- -->
+  <section class="tab-body" data-body="settings">
+    <div class="set-group">
+      <div class="set-title">DeepSeek API</div>
+      <label class="field">
+        <span>API Key（本地持久保存）</span>
+        <div class="row">
+          <input id="set-key" type="password" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" spellcheck="false">
+          <button id="btn-eye" class="ghost-btn small">显示</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>模型</span>
+        <select id="set-model">
+          <option value="deepseek-chat">deepseek-chat（V3 通用）</option>
+          <option value="deepseek-reasoner">deepseek-reasoner（推理）</option>
+        </select>
+      </label>
+      <div class="row btns">
+        <button id="btn-test-api" class="ghost-btn">测试连接</button>
+        <span id="api-status" class="api-status">未配置</span>
+      </div>
+      <p class="hint">Key 只存在你浏览器的 localStorage，只随请求发往 api.deepseek.com。</p>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">桌宠 & 性格</div>
+      <label class="field"><span>宠物名字</span><input id="set-petname" type="text" placeholder="团仔"></label>
+      <label class="field">
+        <span>性格</span>
+        <select id="set-persona">
+          <option value="cheer">元气鼓励型</option>
+          <option value="tough">毒舌监工型</option>
+          <option value="gentle">温柔陪伴型</option>
+          <option value="nerd">理性分析型</option>
+        </select>
+      </label>
+      <label class="switch"><input id="set-voice" type="checkbox"><span>用语音念出它的提醒</span></label>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">每日盘问 & 主动提醒</div>
+      <label class="field"><span>每天盘问时间</span><input id="set-waketime" type="time" value="09:00"></label>
+      <label class="field"><span>晚间复盘时间（留空关闭）</span><input id="set-reviewtime" type="time"></label>
+      <label class="field"><span>静默时间（不打扰）</span>
+        <div class="row"><input id="set-quiet-start" type="time" value="23:00"><span class="sep">至</span><input id="set-quiet-end" type="time" value="07:30"></div>
+      </label>
+      <label class="field"><span>发呆多久就来戳你（分钟）</span><input id="set-idle" type="number" min="1" max="120" value="12"></label>
+      <label class="field"><span>专注时长（分钟）</span><input id="set-focus" type="number" min="5" max="180" value="25"></label>
+      <label class="field"><span>提前提醒节点</span><input id="set-leads" type="text" value="1440,180,30,0"></label>
+      <label class="switch"><input id="set-proactive" type="checkbox" checked><span>开启主动提醒与引导</span></label>
+      <label class="switch"><input id="set-daily" type="checkbox" checked><span>每天自动询问待办与截止日期</span></label>
+      <div class="row btns">
+        <button id="btn-notify-perm" class="ghost-btn">申请通知权限</button>
+        <button id="btn-checkin-now" class="ghost-btn">立刻盘问一次</button>
+      </div>
+      <p id="notify-status" class="hint"></p>
+    </div>
+
+    <div class="set-group">
+      <div class="set-title">数据</div>
+      <div class="row btns">
+        <button id="btn-export" class="ghost-btn">导出备份</button>
+        <button id="btn-import" class="ghost-btn">导入备份</button>
+        <button id="btn-clear" class="ghost-btn danger">清空数据</button>
+      </div>
+      <input id="import-file" type="file" accept="application/json" hidden>
+      <p class="hint">数据保存在本机浏览器。换设备请先导出备份。</p>
+    </div>
+  </section>
+</aside>
+
+<!-- 页内提醒（WebView 不支持系统通知时的替身） -->
+<div id="banner" class="banner hidden">
+  <div class="banner-orb">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8" /><path d="M13.7 20a2 2 0 0 1-3.4 0"/></svg>
+  </div>
+  <div class="banner-body">
+    <div id="banner-title" class="banner-title">提醒</div>
+    <div id="banner-text" class="banner-text"></div>
+    <div class="banner-actions">
+      <button id="banner-ok" class="banner-btn">去处理</button>
+      <button id="banner-later" class="banner-btn ghost">稍后</button>
+    </div>
+  </div>
+  <button id="banner-close" class="banner-x">×</button>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+/* store.js —— 数据层：持久化、任务模型、事件总线、日期工具 */
+window.PTB = window.PTB || {};
+
+(function (PTB) {
+  'use strict';
+
+  var KEY = 'ptb.state.v1';
+
+  /* ---------------- 事件总线 ---------------- */
+  var handlers = {};
+  PTB.bus = {
+    on: function (name, fn) { (handlers[name] = handlers[name] || []).push(fn); },
+    emit: function (name, payload) {
+      (handlers[name] || []).forEach(function (fn) {
+        try { fn(payload); } catch (e) { console.error('[bus]', name, e); }
+      });
+    }
+  };
+
+  /* ---------------- 日期工具 ---------------- */
+  var D = {
+    pad: function (n) { return String(n).padStart(2, '0'); },
+    todayKey: function (d) { d = d || new Date(); return d.getFullYear() + '-' + D.pad(d.getMonth() + 1) + '-' + D.pad(d.getDate()); },
+    // -> "MM-DD HH:mm"
+    short: function (iso) {
+      if (!iso) return '';
+      var d = new Date(iso);
+      return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + D.pad(d.getHours()) + ':' + D.pad(d.getMinutes());
+    },
+    clock: function (iso) { var d = new Date(iso); return D.pad(d.getHours()) + ':' + D.pad(d.getMinutes()); },
+    dayDiff: function (iso) {
+      var d = new Date(iso); d.setHours(0, 0, 0, 0);
+      var t = new Date(); t.setHours(0, 0, 0, 0);
+      return Math.round((d - t) / 86400000);
+    },
+    minutesBetween: function (a, b) { return Math.round((new Date(b) - new Date(a)) / 60000); },
+    // 相对今天计算截止日期的口语描述
+    humanDue: function (iso) {
+      if (!iso) return '无期限';
+      var diff = D.dayDiff(iso);
+      var name = diff === 0 ? '今天' : diff === 1 ? '明天' : diff === 2 ? '后天' : diff === -1 ? '昨天'
+        : (diff < 0 ? Math.abs(diff) + '天前' : diff + '天后');
+      return name + ' ' + D.clock(iso);
+    },
+    remaining: function (iso) {
+      var ms = new Date(iso) - Date.now();
+      if (ms < 0) return '已逾期 ' + D.humanSpan(-ms);
+      return '还剩 ' + D.humanSpan(ms);
+    },
+    humanSpan: function (ms) {
+      var m = Math.round(ms / 60000);
+      if (m < 1) return '不到1分钟';
+      if (m < 60) return m + '分钟';
+      var h = Math.floor(m / 60), r = m % 60;
+      if (h < 24) return h + '小时' + (r ? r + '分' : '');
+      var d = Math.floor(h / 24), rh = h % 24;
+      return d + '天' + (rh ? rh + '小时' : '');
+    },
+    // 今天某个 HH:mm 的时间戳
+    atToday: function (hm, baseDate) {
+      var p = (hm || '09:00').split(':');
+      var d = baseDate ? new Date(baseDate) : new Date();
+      d.setHours(+p[0] || 0, +p[1] || 0, 0, 0);
+      return d;
+    },
+    addDays: function (date, n) { var d = new Date(date); d.setDate(d.getDate() + n); return d; },
+    isoOf: function (d) { return new Date(d).toISOString(); }
+  };
+  PTB.D = D;
+
+  /* ---------------- 默认状态 ---------------- */
+  function defaults() {
+    return {
+      v: 1,
+      settings: {
+        apiKey: '',            // 混淆后存储
+        model: 'deepseek-chat',
+        persona: 'cheer',
+        petName: '团仔',
+        voice: false,
+        dailyCheckIn: true,
+        wakeTime: '09:00',
+        reviewTime: '',
+        quietStart: '23:00',
+        quietEnd: '07:30',
+        idleMinutes: 12,
+        focusMinutes: 25,
+        leadMinutes: [1440, 180, 30, 0],
+        proactive: true
+      },
+      tasks: [],
+      chat: [],
+      plan: { blocks: [], date: '', summary: '' },
+      pet: { mood: 'idle', level: 1, exp: 0, pos: null },
+      stats: { completed: 0, created: 0, lastCheckIn: '', lastReview: '', streak: 0, lastDoneDate: '' },
+      nudgeLog: {},          // taskId -> {last:ts, count:n}
+      lastActivity: Date.now()
+    };
+  }
+
+  var state = null;
+
+  function deepMerge(base, patch) {
+    if (!patch || typeof patch !== 'object') return base;
+    Object.keys(base).forEach(function (k) {
+      if (!(k in patch)) return;
+      var b = base[k], p = patch[k];
+      if (Array.isArray(b)) { if (Array.isArray(p)) base[k] = p; }
+      else if (b && typeof b === 'object') base[k] = deepMerge(b, p);
+      else if (typeof p === typeof b || b === null) base[k] = p;
+    });
+    return base;
+  }
+
+  function load() {
+    var fresh = defaults();
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (!raw) return fresh;
+      return deepMerge(fresh, JSON.parse(raw));
+    } catch (e) {
+      console.warn('状态损坏，已重置', e);
+      return fresh;
+    }
+  }
+
+  state = load();
+
+  var saveTimer = null;
+  function save(immediate) {
+    if (saveTimer) clearTimeout(saveTimer);
+    var doSave = function () {
+      try { localStorage.setItem(KEY, JSON.stringify(state)); }
+      catch (e) { console.error('保存失败', e); }
+    };
+    if (immediate) doSave(); else saveTimer = setTimeout(doSave, 180);
+  }
+
+  /* ---------------- Key 混淆（本地防窥，非加密） ---------------- */
+  function obf(str) {
+    if (!str) return '';
+    try { return btoa(unescape(encodeURIComponent('_ptb_' + str))); } catch (e) { return ''; }
+  }
+  function deobf(str) {
+    if (!str) return '';
+    try {
+      var s = decodeURIComponent(escape(atob(str)));
+      return s.indexOf('_ptb_') === 0 ? s.slice(5) : '';
+    } catch (e) { return ''; }
+  }
+
+  function uid() {
+    return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
+  /* ---------------- 任务 CRUD ---------------- */
+  var Task = {
+    create: function (data) {
+      var t = {
+        id: uid(),
+        title: (data.title || '').trim() || '未命名任务',
+        note: data.note || '',
+        deadline: data.deadline || null,
+        estimate: data.estimate || 30,
+        priority: data.priority || 'mid',
+        tags: data.tags || [],
+        status: 'todo',
+        progress: 0,
+        subtasks: data.subtasks || [],
+        planStart: data.planStart || null,
+        planEnd: data.planEnd || null,
+        createdAt: new Date().toISOString(),
+        startedAt: null,
+        completedAt: null,
+        source: data.source || 'manual',
+        firedLeads: []
+      };
+      state.tasks.push(t);
+      state.stats.created++;
+      save();
+      PTB.bus.emit('tasks:changed', state.tasks);
+      return t;
+    },
+    get: function (id) { return state.tasks.filter(function (t) { return t.id === id; })[0] || null; },
+    update: function (id, patch) {
+      var t = Task.get(id); if (!t) return null;
+      Object.keys(patch).forEach(function (k) { t[k] = patch[k]; });
+      save();
+      PTB.bus.emit('tasks:changed', state.tasks);
+      return t;
+    },
+    remove: function (id) {
+      state.tasks = state.tasks.filter(function (t) { return t.id !== id; });
+      save();
+      PTB.bus.emit('tasks:changed', state.tasks);
+    },
+    toggle: function (id) {
+      var t = Task.get(id); if (!t) return;
+      var done = t.status !== 'done';
+      t.status = done ? 'done' : 'todo';
+      t.progress = done ? 100 : 0;
+      t.completedAt = done ? new Date().toISOString() : null;
+      if (t.subtasks && t.subtasks.length) {
+        t.subtasks.forEach(function (s) { s.done = done; });
+      }
+      if (done) {
+        state.stats.completed++;
+        var today = D.todayKey();
+        if (state.stats.lastDoneDate !== today) {
+          var y = D.todayKey(D.addDays(new Date(), -1));
+          state.stats.streak = state.stats.lastDoneDate === y ? state.stats.streak + 1 : 1;
+          state.stats.lastDoneDate = today;
+        }
+      }
+      save();
+      PTB.bus.emit('tasks:changed', state.tasks);
+      PTB.bus.emit(done ? 'task:done' : 'task:undone', t);
+    },
+    open: function () {
+      return state.tasks.filter(function (t) { return t.status !== 'done'; });
+    },
+    todayOpen: function () {
+      var k = D.todayKey();
+      return Task.open().filter(function (t) {
+        return (t.deadline && D.todayKey(new Date(t.deadline)) <= k) || (!t.deadline && D.todayKey(new Date(t.createdAt)) <= k);
+      });
+    },
+    overdue: function () {
+      return Task.open().filter(function (t) { return t.deadline && new Date(t.deadline) < Date.now(); });
+    }
+  };
+
+  /* ---------------- 聊天记忆 ---------------- */
+  var Chat = {
+    push: function (role, content, extra) {
+      var m = { role: role, content: content, ts: Date.now() };
+      if (extra) Object.keys(extra).forEach(function (k) { m[k] = extra[k]; });
+      state.chat.push(m);
+      if (state.chat.length > 120) state.chat = state.chat.slice(-120);
+      save();
+      PTB.bus.emit('chat:new', m);
+      return m;
+    },
+    recent: function (n) {
+      return state.chat.slice(-(n || 16)).map(function (m) { return { role: m.role, content: m.content }; });
+    },
+    clear: function () { state.chat = []; save(); PTB.bus.emit('chat:changed'); }
+  };
+
+  /* ---------------- 导出接口 ---------------- */
+  PTB.store = {
+    get state() { return state; },
+    get settings() { return state.settings; },
+    save: save,
+    apiKey: function () { return deobf(state.settings.apiKey); },
+    setApiKey: function (k) { state.settings.apiKey = obf(k); save(true); },
+    Task: Task,
+    Chat: Chat,
+    uid: uid,
+    reset: function () { state = defaults(); save(true); PTB.bus.emit('tasks:changed', state.tasks); },
+    replaceState: function (obj) { state = obj; save(true); PTB.bus.emit('tasks:changed', state.tasks); },
+    touchActivity: function () { state.lastActivity = Date.now(); },
+    inQuietHours: function (now) {
+      var s = state.settings;
+      if (!s.quietStart || !s.quietEnd) return false;
+      now = now || new Date();
+      var cur = now.getHours() * 60 + now.getMinutes();
+      var a = D.atToday(s.quietStart);
+      var b = D.atToday(s.quietEnd);
+      var start = a.getHours() * 60 + a.getMinutes();
+      var end = b.getHours() * 60 + b.getMinutes();
+      if (start === end) return false;
+      return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end);
+    }
+  };
+})(window.PTB);
+
+</script>
+<script>
+/* ds.js —— DeepSeek 客户端：聊天、任务抽取、卡点辅导 */
+window.PTB = window.PTB || {};
+
+(function (PTB) {
+  'use strict';
+
+  var ENDPOINT = 'https://api.deepseek.com/chat/completions';
+  var TIMEOUT = 60000;
+
+  var PERSONA = {
+    cheer: {
+      name: '元气鼓励型',
+      tone: '活泼、元气、爱用 emoji，像一个陪你写作业的好朋友。善于把大事拆小，先肯定再提建议。'
+    },
+    tough: {
+      name: '毒舌监工型',
+      tone: '嘴硬心软的监工，吐槽你不行动但真的在帮你，毒舌但每句都指向下一步动作，不说废话。'
+    },
+    gentle: {
+      name: '温柔陪伴型',
+      tone: '轻声细语、体贴、能接住焦虑，先共情再给一个最小可行的下一步。'
+    },
+    nerd: {
+      name: '理性分析型',
+      tone: '冷静、结构化、喜欢列点和给框架，优先给可执行清单和风险提示。'
+    }
+  };
+
+  function key() { return PTB.store.apiKey(); }
+
+  function hasKey() { return !!key(); }
+
+  function buildSystem(extra) {
+    var s = PTB.store.settings;
+    var p = PERSONA[s.persona] || PERSONA.cheer;
+    var now = new Date();
+    var ctx = [
+      '你是「' + (s.petName || '团仔') + '」，一个住在用户桌面的桌宠任务管家。',
+      '性格设定：' + p.tone,
+      '当前时间：' + PTB.D.isoOf(now).slice(0, 10) + ' ' + PTB.D.clock(new Date()) + '（星期' + '日一二三四五六'[now.getDay()] + '）。',
+      '你掌握用户的任务清单与截止日期，职责是：帮他理顺排程、在他没进展时主动推一把、把卡住的事拆成 15 分钟内能动手的第一步。',
+      '规则：',
+      '1. 说话简短，中文，每段不超过 3 句，除非用户在问复杂问题。',
+      '2. 永远给出「下一步具体动作」，不要空泛鼓励。',
+      '3. 涉及任务增删改时先说我帮你记下了，再复述要点。',
+      '4. 不要输出 Markdown 标题和代码块，用朴素口语。'
+    ];
+    if (extra) ctx = ctx.concat(extra);
+    return ctx.join('\n');
+  }
+
+  function taskDigest() {
+    var tasks = PTB.store.Task.open().slice(0, 25);
+    if (!tasks.length) return '当前没有未完成任务。';
+    return tasks.map(function (t, i) {
+      return (i + 1) + '. ' + t.title +
+        (t.deadline ? '｜截止 ' + PTB.D.short(t.deadline) + '（' + PTB.D.remaining(t.deadline) + '）' : '｜无期限') +
+        '｜预估 ' + (t.estimate || 30) + ' 分钟｜状态 ' + (t.status === 'doing' ? '进行中' : '待开始') +
+        (t.subtasks && t.subtasks.length ? '｜子步骤 ' + t.subtasks.filter(function (s) { return s.done; }).length + '/' + t.subtasks.length : '');
+    }).join('\n');
+  }
+
+  /* ---------------- 基础请求 ---------------- */
+  function request(body, onToken) {
+    return new Promise(function (resolve, reject) {
+      if (!hasKey()) { reject(new Error('NO_KEY')); return; }
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', ENDPOINT, true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('Authorization', 'Bearer ' + key());
+      xhr.timeout = TIMEOUT;
+
+      var seen = '';
+      var timer = setTimeout(function () { try { xhr.abort(); } catch (e) {} }, TIMEOUT + 5000);
+
+      if (onToken) {
+        var lastLen = 0;
+        xhr.onprogress = function () {
+          var text = xhr.responseText || '';
+          if (text.length === lastLen) return;
+          lastLen = text.length;
+          try {
+            var lines = text.split('\n');
+            var delta = '';
+            for (var i = lines.length - 1; i >= 0; i--) {
+              var line = lines[i].trim();
+              if (!line) continue;
+              if (line.indexOf('data:') !== 0) break;
+              var payload = line.slice(5).trim();
+              if (payload === '[DONE]') break;
+              try {
+                var j = JSON.parse(payload);
+                var piece = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
+                if (piece) { seen += piece; delta += piece; }
+              } catch (e) { /* 忽略半行 */ }
+              if (delta) break;
+            }
+            if (delta) onToken(delta, seen);
+          } catch (e) { /* 流式解析容错 */ }
+        };
+      }
+
+      xhr.onload = function () {
+        clearTimeout(timer);
+        var data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (e) {}
+        if (xhr.status >= 200 && xhr.status < 300 && data) {
+          if (onToken) { resolve({ content: seen || (data.choices && data.choices[0].message.content) || '' }); return; }
+          var c = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+          resolve({ content: c || '', raw: data });
+        } else {
+          var msg = (data && data.error && data.error.message) || ('HTTP ' + xhr.status);
+          reject(new Error(msg));
+        }
+      };
+      xhr.onerror = function () { clearTimeout(timer); reject(new Error('连不上 AI：浏览器拦截了跨域请求（直接打开本地文件会这样），请安装 App 使用；也可能是网络断了')); };
+      xhr.ontimeout = function () { clearTimeout(timer); reject(new Error('请求超时')); };
+      xhr.send(JSON.stringify(body));
+    });
+  }
+
+  /* ---------------- 对话 ---------------- */
+  function chat(userText, opts) {
+    opts = opts || {};
+    var msgs = [{ role: 'system', content: buildSystem(opts.systemExtra ? [opts.systemExtra] : null) }];
+    msgs = msgs.concat(PTB.store.Chat.recent(opts.memory === undefined ? 12 : opts.memory));
+    msgs.push({ role: 'user', content: userText });
+
+    return request({
+      model: PTB.store.settings.model || 'deepseek-chat',
+      messages: msgs,
+      temperature: opts.temperature || 0.8,
+      max_tokens: opts.max_tokens || 700,
+      stream: !!opts.onToken
+    }, opts.onToken);
+  }
+
+  function test() {
+    return new Promise(function (resolve, reject) {
+      request({
+        model: PTB.store.settings.model || 'deepseek-chat',
+        messages: [{ role: 'user', content: '只回复两个字：在呢' }],
+        max_tokens: 10
+      }).then(function (r) { resolve(r.content.trim()); }).catch(reject);
+    });
+  }
+
+  /* ---------------- 结构化：从自然语言中抽取任务 ---------------- */
+  var EXTRACT_SYS = [
+    '你是任务解析引擎。把用户的自然语言输入解析成结构化任务清单。',
+    '必须只输出 JSON，格式如下（不要输出多余文字）：',
+    '{"reply":"桌宠口吻的一句话确认，最多 30 字","tasks":[{"title":"动词开头的任务标题","deadline":"YYYY-MM-DD HH:mm 或 null","estimate":预估分钟数,"priority":"high|mid|low","subtasks":["15分钟内能做完的第一步","第二步"]}]}',
+    '时间推断规则：以当前时间为准推断「明天下午三点」这类相对时间；没有明确时间的 deadline 填 null；预估分钟数填整数，默认 30；副task 只在用户说不清楚或任务较大时给 2-4 步，否则空数组。'
+  ].join('\n');
+
+  function parseTasks(text) {
+    var body = {
+      model: PTB.store.settings.model || 'deepseek-chat',
+      messages: [
+        { role: 'system', content: EXTRACT_SYS + '\n当前时间：' + PTB.D.isoOf(new Date()).slice(0, 16).replace('T', ' ') },
+        { role: 'user', content: text }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      max_tokens: 900
+    };
+    return request(body).then(function (r) { return safeJson(r.content); });
+  }
+
+  function safeJson(txt) {
+    if (!txt) throw new Error('空响应');
+    try { return JSON.parse(txt); } catch (e) { /* 继续尝试 */ }
+    var m = txt.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (m) { try { return JSON.parse(m[1]); } catch (e2) {} }
+    var s = txt.indexOf('{'), e3 = txt.lastIndexOf('}');
+    if (s > -1 && e3 > s) {
+      try { return JSON.parse(txt.slice(s, e3 + 1)); } catch (e4) {}
+    }
+    throw new Error('无法解析返回结果');
+  }
+
+  /* ---------------- 结构化：卡点诊断与拆解 ---------------- */
+  var COACH_SYS = [
+    '你是效率教练。用户正卡在某件事上（可能是拖延、不清楚怎么下手、被别的事打断、或遇到技术障碍）。',
+    '只输出 JSON：{"reply":"先共情一句+点破卡住的真正原因，50 字以内","steps":["15 分钟内能动手的第一步","第二步","第三步"],"question":"一个能帮用户继续说清楚处境的追问"}',
+    '要求：步骤必须具体到能在 5-15 分钟执行完，动词开头，不要大词；steps 给 3 条。'
+  ].join('\n');
+
+  function coach(taskTitle, context) {
+    var body = {
+      model: PTB.store.settings.model || 'deepseek-chat',
+      messages: [
+        { role: 'system', content: COACH_SYS },
+        { role: 'user', content: '卡住的任务：' + taskTitle + '\n补充：' + (context || '无') + '\n其他待办：\n' + taskDigest() }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.7,
+      max_tokens: 600
+    };
+    return request(body).then(function (r) { return safeJson(r.content); });
+  }
+
+  /* ---------------- 结构化：每日盘问的开场白 / 复盘 ---------------- */
+  function greet(kind) {
+    var prompt = kind === 'review'
+      ? '现在是晚间复盘时间。请生成一段 60 字以内的晚间复盘开场：肯定今天完成的事、点出没做完但不责备、问一句明天最重要的一件事是什么。'
+      : '现在是每日待办采集时间。请用桌宠口吻生成 50 字以内的开场：先简短招呼，然后请用户一口气把今天的待办和各自截止时间说出来，并举例说明说法（例如"下午三点前把方案初稿发给王总，大概40分钟"）。';
+    return chat(prompt, { memory: 2, max_tokens: 200, temperature: 0.9 });
+  }
+
+  PTB.ds = {
+    ENDPOINT: ENDPOINT,
+    hasKey: hasKey,
+    setEndpoint: function (u) { ENDPOINT = u; },
+    chat: chat,
+    test: test,
+    parseTasks: parseTasks,
+    coach: coach,
+    greet: greet,
+    taskDigest: taskDigest,
+    buildSystem: buildSystem,
+    PERSONA: PERSONA,
+    safeJson: safeJson
+  };
+})(window.PTB);
+
+</script>
+<script>
+/* scheduler.js —— 排程引擎：把任务按截止日期塞进时间轴 */
+window.PTB = window.PTB || {};
+
+(function (PTB) {
+  'use strict';
+
+  var WORK_START = '09:00';
+  var WORK_END = '22:00';
+  var CHUNK = 45;          // 单块最大专注时长
+  var BREAK = 8;           // 块间休息
+
+  function minsOf(hm) { var p = hm.split(':'); return (+p[0]) * 60 + (+p[1] || 0); }
+  function hmOf(m) { var h = Math.floor(m / 60), r = m % 60; return PTB.D.pad(h) + ':' + PTB.D.pad(r); }
+
+  function score(t) {
+    var s = 0;
+    if (t.priority === 'high') s -= 300;
+    if (t.priority === 'low') s += 300;
+    if (!t.deadline) return s + 1e6;
+    var left = (new Date(t.deadline) - Date.now()) / 60000;
+    if (left < 0) return s - 1e5;          // 逾期优先
+    return s + left;                        // 越紧急越靠前
+  }
+
+  /* 生成计划：返回 [{taskId,title,start,end,dateKey}] */
+  function buildPlan() {
+    var open = PTB.store.Task.open().slice();
+    var today = PTB.D.todayKey();
+    open.sort(function (a, b) { return score(a) - score(b); });
+
+    var blocks = [];
+    if (!open.length) {
+      PTB.store.state.plan = { blocks: [], date: today, summary: '今天没有待办，先休息一下或新增任务吧。' };
+      PTB.store.save();
+      return PTB.store.state.plan;
+    }
+
+    var now = new Date();
+    var endMin = minsOf(WORK_END);
+    var MAX_DAY = 2;
+    var overflow = [];
+
+    // 游标：今天当前时间向上取整到 15 分钟，且不早于工作时段开始
+    var cursor = new Date(now.getTime());
+    cursor.setMinutes(Math.ceil(cursor.getMinutes() / 15) * 15, 0, 0);
+    if (cursor.getHours() * 60 + cursor.getMinutes() < minsOf(WORK_START)) {
+      cursor = PTB.D.atToday(WORK_START);
+    }
+    if (cursor.getHours() * 60 + cursor.getMinutes() >= endMin) {
+      cursor = PTB.D.atToday(WORK_START, PTB.D.addDays(now, 1));
+    }
+
+    function dayIndexOf(d) {
+      return Math.round((new Date(PTB.D.todayKey(d) + 'T00:00:00') - new Date(PTB.D.todayKey(now) + 'T00:00:00')) / 86400000);
+    }
+
+    // 轮转分配：先给每个任务一个 45 分钟块，再回头补第二轮，避免大任务独占整天
+    var pool = open.map(function (t) {
+      return { t: t, need: Math.max(10, Math.min(t.estimate || 30, 240)) };
+    });
+    var overflow = [];
+    var guard = 0;
+
+    function advanceToValid() {
+      // 把游标推进到「当天工作时段内」的合法位置，跨过非工作时段
+      if (cursor >= PTB.D.atToday(WORK_END, cursor)) {
+        cursor = PTB.D.atToday(WORK_START, PTB.D.addDays(cursor, 1));
+      }
+      if (cursor < PTB.D.atToday(WORK_START, cursor)) {
+        cursor = PTB.D.atToday(WORK_START, cursor);
+      }
+      if (cursor < now) cursor = new Date(now.getTime());
+    }
+
+    function placeOne(r) {
+      var tries = 0;
+      while (tries < 4) {
+        tries++;
+        advanceToValid();
+        var off = Math.max(0, dayIndexOf(cursor));
+        if (off > MAX_DAY) return false;
+        var curMin = cursor.getHours() * 60 + cursor.getMinutes();
+        var room = endMin - curMin;
+        if (room <= 0) { cursor = PTB.D.atToday(WORK_START, PTB.D.addDays(cursor, 1)); continue; }
+        var take = Math.min(CHUNK, r.need, room);
+        var bstart = new Date(cursor.getTime());
+        var bend = new Date(cursor.getTime() + take * 60000);
+        blocks.push({
+          taskId: r.t.id,
+          title: r.t.title,
+          start: bstart.toISOString(),
+          end: bend.toISOString(),
+          dateKey: PTB.D.todayKey(cursor)
+        });
+        if (!r.t.planStart) { r.t.planStart = bstart.toISOString(); r.t.planEnd = bend.toISOString(); }
+        r.need -= take;
+        cursor = new Date(bend.getTime() + BREAK * 60000);
+        return true;
+      }
+      return false;
+    }
+
+    while (pool.some(function (r) { return r.need > 0; }) && guard < 300) {
+      guard++;
+      var progressed = false;
+      for (var j = 0; j < pool.length; j++) {
+        if (pool[j].need <= 0) continue;
+        if (!placeOne(pool[j])) { break; }
+        progressed = true;
+      }
+      if (!progressed) break;
+    }
+
+    pool.forEach(function (r) { if (r.need > 0) overflow.push(r.t.title); });
+
+    // 汇总今天
+    var todayBlocks = blocks.filter(function (b) { return b.dateKey === today; });
+    var totalMin = todayBlocks.reduce(function (a, b) { return a + (new Date(b.end) - new Date(b.start)) / 60000; }, 0);
+    var summary = '今天安排 ' + todayBlocks.length + ' 个时间块，共约 ' + Math.round(totalMin) + ' 分钟；' +
+      '未完成 ' + PTB.store.Task.open().length + ' 项，其中逾期 ' + PTB.store.Task.overdue().length + ' 项。' +
+      (overflow.length ? ' ⚠️ 排不下（时间不够）：' + overflow.slice(0, 3).join('、') : '');
+
+    PTB.store.state.plan = { blocks: blocks, date: today, summary: summary, overflow: overflow };
+    PTB.store.save();
+    return PTB.store.state.plan;
+  }
+
+  /* 现在该做什么 */
+  function nextUp() {
+    var now = Date.now();
+    var blocks = PTB.store.state.plan.blocks || [];
+    var upcoming = blocks.filter(function (b) { return new Date(b.end) > now; });
+    if (!upcoming.length) return null;
+    upcoming.sort(function (a, b) { return new Date(a.start) - new Date(b.start); });
+    return upcoming[0];
+  }
+
+  /* 当前时间正在进行的块 */
+  function currentBlock() {
+    var now = Date.now();
+    var blocks = PTB.store.state.plan.blocks || [];
+    return blocks.filter(function (b) { return new Date(b.start) <= now && new Date(b.end) >= now; })[0] || null;
+  }
+
+  /* 是否今天的计划已排过 */
+  function isFresh() {
+    return PTB.store.state.plan.date === PTB.D.todayKey() && (PTB.store.state.plan.blocks || []).length > 0;
+  }
+
+  /* 空闲时间评估：今天剩余未安排的空档 */
+  function freeWindows(dateKey) {
+    var day = PTB.store.state.plan.blocks.filter(function (b) { return b.dateKey === dateKey; });
+    return { blocks: day, start: WORK_START, end: WORK_END, chunk: CHUNK };
+  }
+
+  PTB.scheduler = {
+    buildPlan: buildPlan,
+    nextUp: nextUp,
+    currentBlock: currentBlock,
+    isFresh: isFresh,
+    freeWindows: freeWindows,
+    hmOf: hmOf,
+    minsOf: minsOf,
+    WORK_START: WORK_START,
+    WORK_END: WORK_END
+  };
+})(window.PTB);
+
+</script>
+<script>
+/* notify.js —— 主动提醒：通知栏、声音、标题闪烁、去重 */
+window.PTB = window.PTB || {};
+
+(function (PTB) {
+  'use strict';
+
+  var BASE_TITLE = document.title;
+  var audioCtx = null;
+  var flashTimer = null;
+
+  function permission() {
+    if (!('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+  }
+
+  function request() {
+    return new Promise(function (resolve) {
+      if (!('Notification' in window)) { resolve('unsupported'); return; }
+      if (Notification.permission === 'granted') { resolve('granted'); return; }
+      try {
+        Notification.requestPermission().then(function (p) { resolve(p); });
+      } catch (e) {
+        Notification.requestPermission(function (p) { resolve(p); });
+      }
+    });
+  }
+
+  /* ---------------- 页内提醒横幅 ----------------
+     手机 WebView / 荣耀自带浏览器常常不支持 Notification API，
+     所以只要拿不到授权，就退化为「页内卡片 + 震动 + 声音」。 */
+  var queue = [];
+  var bannerBusy = false;
+  var bannerTimer = null;
+
+  function vibrate(pattern) {
+    try { if (navigator.vibrate) navigator.vibrate(pattern || [90, 60, 90]); } catch (e) {}
+  }
+
+  function showBanner(item) {
+    var wrap = document.getElementById('banner');
+    if (!wrap) return;
+    bannerBusy = true;
+    document.getElementById('banner-title').textContent = item.title;
+    document.getElementById('banner-text').textContent = item.body;
+    var emojiEl = document.getElementById('banner-emoji');
+    if (emojiEl) emojiEl.textContent = item.emoji || '🔔';
+    wrap.classList.remove('hidden');
+    wrap._item = item;
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(function () { hideBanner(true); }, 25000);
+    vibrate([120, 70, 120]);
+    beep(item.kind || 'normal');
+    flash(item.title);
+  }
+
+  function hideBanner(queued) {
+    var wrap = document.getElementById('banner');
+    if (wrap) wrap.classList.add('hidden');
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    bannerBusy = false;
+    if (queued && queue.length) {
+      var next = queue.shift();
+      setTimeout(function () { showBanner(next); }, 600);
+    }
+  }
+
+  function enqueue(item) {
+    if (bannerBusy) { queue.push(item); return; }
+    showBanner(item);
+  }
+
+  function bindBanner() {
+    ['banner-close', 'banner-later'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.addEventListener('click', function () { hideBanner(true); });
+    });
+    var ok = document.getElementById('banner-ok');
+    if (ok) ok.addEventListener('click', function () {
+      var item = document.getElementById('banner')._item;
+      hideBanner(false);
+      if (item && item.opts) PTB.bus.emit('notification:click', item.opts);
+      else PTB.bus.emit('notification:click', { tab: 'tasks' });
+    });
+  }
+
+  function send(title, body, opts) {
+    opts = opts || {};
+    var tag = opts.tag || ('ptb-' + Date.now());
+    if (opts.force !== true && PTB.store.inQuietHours()) {
+      console.log('[静默时段] 已抑制提醒：', title);
+      return false;
+    }
+    var delivered = false;
+    if (permission() === 'granted') {
+      try {
+        var n = new Notification(title, {
+          body: body,
+          tag: tag,
+          renotify: true,
+          requireInteraction: !!opts.sticky
+        });
+        n.onclick = function () {
+          try { window.focus(); } catch (e) {}
+          PTB.bus.emit('notification:click', opts);
+          n.close();
+        };
+        setTimeout(function () { try { n.close(); } catch (e) {} }, opts.sticky ? 600000 : 15000);
+        delivered = true;
+      } catch (e) {
+        console.warn('通知失败', e);
+      }
+    }
+    if (!delivered) {
+      // 拿不到系统通知就走页内横幅（手机端的主要通道）
+      enqueue({ title: title, body: body, emoji: opts.emoji || '🔔', kind: opts.kind, opts: opts });
+    } else {
+      flash(document.body.dataset.flashText || title);
+      if (opts.sound !== false) beep(opts.kind || 'normal');
+      vibrate([80]);
+    }
+    PTB.bus.emit('notify:fired', { title: title, body: body, opts: opts, channel: delivered ? 'system' : 'inapp' });
+    return true;
+  }
+
+  /* ---------------- 声音：WebAudio 合成，无需外部文件 ---------------- */
+  function unlockAudio() {
+    // 手机浏览器要求用户手势后才能出声，首次点击时预解锁
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch (e) { /* 忽略 */ }
+  }
+
+  function beep(kind) {
+    if (!PTB.store.settings.voice && kind !== 'alarm') {
+      // 语音关闭时也保留轻提示音；真正关闭需在设置里另配，这里只做降级
+    }
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      var seq = kind === 'alarm'
+        ? [[880, 0], [0, 120], [880, 120], [0, 120], [880, 120]]
+        : kind === 'warn' ? [[740, 0], [560, 160]] : [[620, 0], [880, 130]];
+      seq.forEach(function (p) {
+        if (!p[0]) return;
+        var t0 = audioCtx.currentTime + p[1] / 1000;
+        var osc = audioCtx.createOscillator();
+        var gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = p[0];
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.exponentialRampToValueAtTime(0.22, t0 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(t0); osc.stop(t0 + 0.3);
+      });
+    } catch (e) { /* 忽略声音错误 */ }
+  }
+
+  /* ---------------- 标题闪烁 ---------------- */
+  function flash(text) {
+    if (flashTimer) clearInterval(flashTimer);
+    var on = false, n = 0;
+    flashTimer = setInterval(function () {
+      document.title = on ? '🔔 ' + text : BASE_TITLE;
+      on = !on; n++;
+      if (n > 20) { clearInterval(flashTimer); flashTimer = null; document.title = BASE_TITLE; }
+    }, 700);
+  }
+
+  /* ---------------- Toast（页内轻提示） ---------------- */
+  function toast(text, ms) {
+    var el = document.getElementById('toast');
+    if (!el) return;
+    el.textContent = text;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(function () { el.classList.remove('show'); }, ms || 2600);
+  }
+
+  /* ---------------- 任务节点提醒扫描 ---------------- */
+  function checkDeadlines() {
+    var leads = (PTB.store.settings.leadMinutes || [1440, 180, 30, 0]);
+    var now = Date.now();
+    var tasks = PTB.store.Task.open();
+    var out = [];
+    tasks.forEach(function (t) {
+      if (!t.deadline) return;
+      t.firedLeads = t.firedLeads || [];
+      var due = new Date(t.deadline).getTime();
+      // 收集所有已到点的提醒节点，只推送最紧迫的一个，其余静默标记为已触发
+      var pending = [];
+      leads.forEach(function (lead) {
+        var key = lead + '@' + t.deadline;
+        if (t.firedLeads.indexOf(key) > -1) return;
+        var at = due - lead * 60000;
+        if (now >= at) pending.push({ lead: lead, key: key, at: at });
+      });
+      if (!pending.length) return;
+      pending.sort(function (a, b) { return a.lead - b.lead; });
+      var chosen = null;
+      pending.forEach(function (p) {
+        var stale = now - p.at > 2 * 3600000;   // 错过超过 2 小时的温和提醒不再事后补发
+        t.firedLeads.push(p.key);
+        if (!stale && chosen === null) chosen = p;
+      });
+      if (chosen) out.push({ task: t, lead: chosen.lead });
+    });
+    if (out.length) PTB.store.save();
+    return out;
+  }
+
+  /* ---------------- 计划块开始提醒 ---------------- */
+  function checkPlanStart() {
+    var plan = PTB.store.state.plan || { blocks: [] };
+    plan.firedBlocks = plan.firedBlocks || [];
+    var now = Date.now();
+    var out = [];
+    (plan.blocks || []).forEach(function (b, idx) {
+      var k = b.taskId + '@' + b.start;
+      var st = new Date(b.start).getTime();
+      if (now >= st && now - st < 30 * 60000 && plan.firedBlocks.indexOf(k) === -1) {
+        plan.firedBlocks.push(k);
+        out.push(b);
+      }
+      if (idx > 200) return false;
+    });
+    if (out.length) PTB.store.save();
+    return out;
+  }
+
+  function icsEscape(s) { return String(s).replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n'); }
+
+  function toICSDate(iso) {
+    var d = new Date(iso);
+    function p(n) { return String(n).padStart(2, '0'); }
+    return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + 'T' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + '00Z';
+  }
+
+  /* 导出 .ics（含闹钟：事件开始前 15 分钟提醒） */
+  function buildICS() {
+    var lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//ptb//pet task butler//CN', 'CALSCALE:GREGORIAN'];
+    var tasks = PTB.store.Task.open();
+    tasks.forEach(function (t) {
+      if (!t.deadline) return;
+      var start = new Date(t.deadline).getTime() - (t.estimate || 30) * 60000;
+      lines.push('BEGIN:VEVENT');
+      lines.push('UID:' + t.id + '@ptb');
+      lines.push('DTSTAMP:' + toICSDate(new Date()));
+      lines.push('DTSTART:' + toICSDate(start));
+      lines.push('DTEND:' + toICSDate(t.deadline));
+      lines.push('SUMMARY:' + icsEscape(t.title));
+      if (t.note) lines.push('DESCRIPTION:' + icsEscape(t.note));
+      lines.push('BEGIN:VALARM');
+      lines.push('TRIGGER:-PT15M');
+      lines.push('ACTION:DISPLAY');
+      lines.push('DESCRIPTION:' + icsEscape('该开始了：' + t.title));
+      lines.push('END:VALARM');
+      lines.push('END:VEVENT');
+    });
+    lines.push('END:VCALENDAR');
+    return lines.join('\r\n');
+  }
+
+  function downloadICS() {
+    var blob = new Blob([buildICS()], { type: 'text/calendar;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = '团仔任务提醒.ics';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+
+  PTB.notify = {
+    init: bindBanner,
+    permission: permission,
+    request: request,
+    send: send,
+    vibrate: vibrate,
+    unlockAudio: unlockAudio,
+    bannerQueue: function () { return queue.length; },
+    beep: beep,
+    flash: flash,
+    toast: toast,
+    checkDeadlines: checkDeadlines,
+    checkPlanStart: checkPlanStart,
+    buildICS: buildICS,
+    downloadICS: downloadICS
+  };
+})(window.PTB);
+
+</script>
+<script>
+/* pet.js —— 桌宠：拖拽、情绪、气泡、语音 */
+window.PTB = window.PTB || {};
+
+(function (PTB) {
+  'use strict';
+
+  var stage, dock, bubble, bubbleText, bubbleActions, badge;
+  var moodTimer = null, bubbleTimer = null, blinkTimer = null;
+  var current = 'idle';
+
+  function init() {
+    stage = document.getElementById('pet-stage');
+    dock = document.getElementById('pet-dock');
+    bubble = document.getElementById('bubble');
+    bubbleText = document.getElementById('bubble-text');
+    bubbleActions = document.getElementById('bubble-actions');
+    badge = document.getElementById('pet-badge');
+
+    bindDrag();
+    loopBlink();
+    restorePos();
+
+    document.getElementById('bubble-close').addEventListener('click', function () {
+      hideBubble();
+    });
+
+    stage.addEventListener('click', function (e) {
+      if (stage.dataset.dragged === '1') { stage.dataset.dragged = '0'; return; }
+      if (PTB.pet.onTap) PTB.pet.onTap();
+    });
+
+    // 鼠标/键盘活动计入“用户在场”
+    ['mousemove', 'keydown', 'pointerdown', 'wheel', 'touchstart'].forEach(function (ev) {
+      window.addEventListener(ev, function () { PTB.store.touchActivity(); }, { passive: true });
+    });
+
+    mood(PTB.store.state.pet.mood || 'idle');
+  }
+
+  /* ---------------- 位置 ---------------- */
+  function restorePos() {
+    var p = PTB.store.state.pet.pos;
+    if (!p) return;
+    dock.style.left = p.left; dock.style.top = p.top;
+    dock.style.right = 'auto'; dock.style.bottom = 'auto';
+  }
+  function savePos(left, top) {
+    PTB.store.state.pet.pos = { left: left, top: top };
+    PTB.store.save();
+  }
+
+  function bindDrag() {
+    var dragging = false, moved = false, offX = 0, offY = 0, startX = 0, startY = 0;
+
+    function down(x, y) {
+      dragging = true; moved = false;
+      dock.classList.add('dragging');
+      var r = dock.getBoundingClientRect();
+      offX = x - r.left; offY = y - r.top;
+      startX = x; startY = y;
+    }
+    function move(x, y) {
+      if (!dragging) return;
+      if (Math.abs(x - startX) + Math.abs(y - startY) > 4) { moved = true; stage.dataset.dragged = '1'; }
+      var left = Math.max(4, Math.min(window.innerWidth - dock.offsetWidth - 4, x - offX));
+      var top = Math.max(4, Math.min(window.innerHeight - dock.offsetHeight - 4, y - offY));
+      dock.style.left = left + 'px'; dock.style.top = top + 'px';
+      dock.style.right = 'auto'; dock.style.bottom = 'auto';
+    }
+    function up() {
+      if (!dragging) return;
+      dragging = false;
+      dock.classList.remove('dragging');
+      if (moved) {
+        savePos(dock.style.left, dock.style.top);
+        setTimeout(function () { stage.dataset.dragged = '0'; }, 60);
+      } else {
+        stage.dataset.dragged = '0';
+      }
+    }
+
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('#bubble')) return;
+      down(e.clientX, e.clientY);
+      stage.setPointerCapture && stage.setPointerCapture(e.pointerId);
+    });
+    window.addEventListener('pointermove', function (e) { move(e.clientX, e.clientY); }, { passive: true });
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  /* ---------------- 情绪 ---------------- */
+  function mood(m, ms) {
+    current = m;
+    if (!stage) return;
+    stage.setAttribute('data-mood', m);
+    PTB.store.state.pet.mood = m;
+    if (moodTimer) { clearTimeout(moodTimer); moodTimer = null; }
+    if (ms) {
+      moodTimer = setTimeout(function () { setIdle(); }, ms);
+    } else {
+      PTB.store.save();
+    }
+    var av = document.querySelector('.pet-mini .avatar');
+    if (av) av.setAttribute('data-mood', m);
+  }
+  function setIdle() { mood('idle'); }
+  function temporary(m, ms) { mood(m, ms || 2600); }
+
+  function loopBlink() {
+    function next() {
+      var gap = 2600 + Math.random() * 4200;
+      blinkTimer = setTimeout(function () {
+        if (!stage) return;
+        if (current !== 'idle' && current !== 'happy' && current !== 'focus') { next(); return; }
+        stage.classList.add('blinking');
+        setTimeout(function () { stage.classList.remove('blinking'); next(); }, 150);
+      }, gap);
+    }
+    next();
+  }
+
+  /* ---------------- 说话气泡 ---------------- */
+  function say(text, opts) {
+    opts = opts || {};
+    if (!bubble) return;
+    bubbleText.textContent = text;
+    bubbleActions.innerHTML = '';
+    if (opts.actions && opts.actions.length) {
+      opts.actions.forEach(function (a) {
+        var b = document.createElement('button');
+        b.textContent = a.label;
+        if (a.ghost) b.className = 'ghost';
+        b.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (a.keepOpen !== true) hideBubble();
+          if (a.fn) a.fn();
+        });
+        bubbleActions.appendChild(b);
+      });
+    }
+    bubble.classList.remove('hidden');
+    if (opts.mood) mood(opts.mood, opts.moodMs || 3000);
+    if (opts.speak !== false && PTB.store.settings.voice) speak(text);
+    document.body.dataset.flashText = (PTB.store.settings.petName || '团仔') + '：' + text.slice(0, 18);
+
+    if (bubbleTimer) clearTimeout(bubbleTimer);
+    if (opts.pin) return;
+    var life = Math.min(16000, Math.max(4500, text.length * 220));
+    bubbleTimer = setTimeout(hideBubble, opts.duration || life);
+  }
+
+  function hideBubble() {
+    if (bubble) bubble.classList.add('hidden');
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+  }
+
+  /* ---------------- 语音（Web Speech） ---------------- */
+  function speak(text) {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(String(text).replace(/[（）()【】]/g, ' ').slice(0, 120));
+      u.lang = 'zh-CN';
+      u.rate = 1.05;
+      u.pitch = 1.15;
+      u.volume = 0.9;
+      speechSynthesis.speak(u);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /* ---------------- 徽标 ---------------- */
+  function setBadge(n) {
+    if (!badge) return;
+    if (!n) { badge.classList.add('hidden'); return; }
+    badge.classList.remove('hidden');
+    badge.textContent = n > 99 ? '99+' : String(n);
+  }
+
+  PTB.pet = {
+    init: init,
+    say: say,
+    hide: hideBubble,
+    mood: mood,
+    happy: function (ms) { temporary('happy', ms); },
+    alert: function (ms) { temporary('alert', ms); },
+    worry: function (ms) { temporary('worry', ms); },
+    sleep: function (ms) { temporary('sleep', ms); },
+    focus: function (ms) { temporary('focus', ms); },
+    idle: setIdle,
+    speak: speak,
+    badge: setBadge,
+    onTap: null
+  };
+})(window.PTB);
+
+</script>
+<script>
+/* app.js —— 主控：UI 渲染、对话路由、每日盘问、主动督促、专注计时 */
+(function (PTB) {
+  'use strict';
+
+  var S = PTB.store, D = PTB.D, Task = S.Task, Chat = S.Chat;
+  var el = function (id) { return document.getElementById(id); };
+  var esc = function (s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+
+  var checkinMode = false;
+  var focus = { running: false, endAt: 0, taskId: null, left: 0 };
+  var lastNudge = 0;
+  var lastPlanTodo = {};
+  var tickCount = 0;
+
+  /* ============================================================
+   *  启动
+   * ============================================================ */
+  function isMobile() {
+    return window.matchMedia && window.matchMedia('(max-width:640px)').matches;
+  }
+
+  function init() {
+    PTB.pet.init();
+    PTB.notify.init();
+    PTB.pet.onTap = function () {
+      PTB.notify.unlockAudio();     // 手机需要用户手势后才能出声
+      requestNotifyOnce();
+      var open = !el('panel').classList.contains('collapsed');
+      togglePanel(!open, 'chat');   // 手机上是「点光球开/收面板」
+    };
+    PTB.bus.on('notification:click', function (opts) {
+      togglePanel(true, (opts && opts.tab) || 'tasks');
+    });
+    // 手机端默认只露出光球，点它才展开面板
+    if (isMobile()) togglePanel(false);
+    bindUI();
+    loadSettingsToForm();
+    renderChat();
+    renderTasks();
+    if (!PTB.scheduler.isFresh()) PTB.scheduler.buildPlan();
+    renderPlan();
+    updateBadge();
+    bindPetButtons();
+    setConnDot();
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) { S.touchActivity(); refreshAll(); }
+    });
+    window.addEventListener('resize', function () { /* 无需处理，CSS 自适应 */ });
+
+    setInterval(tick, 1000);
+    bootGreeting();
+  }
+
+  function bootGreeting() {
+    var petName = S.settings.petName || '团仔';
+    var open = Task.open().length;
+    var overdue = Task.overdue().length;
+    var h = new Date().getHours();
+    var timeWord = h < 6 ? '这么晚还没睡啊' : h < 11 ? '早上好' : h < 14 ? '中午好' : h < 18 ? '下午好' : '晚上好';
+    if (!S.settings.apiKey) {
+      setTimeout(function () {
+        PTB.pet.say('我是' + petName + '，' + timeWord + '！先去「设置」填上 DeepSeek 的 Key，我才能帮你拆任务、陪你解决问题～', {
+          mood: 'happy', duration: 12000,
+          actions: [{ label: '去设置', fn: function () { togglePanel(true, 'settings'); el('set-key').focus(); } }]
+        });
+      }, 900);
+      return;
+    }
+    var msg = overdue
+      ? timeWord + '！有 ' + overdue + ' 件事已经逾期了，先从最小的那件动手要不要？'
+      : (open ? timeWord + '！今天还有 ' + open + ' 件事，点我看看怎么排。' : timeWord + '！现在清单是空的，想到什么直接丢给我。');
+    setTimeout(function () { PTB.pet.say(msg, { mood: overdue ? 'worry' : 'happy', duration: 9000 }); }, 900);
+  }
+
+  /* ============================================================
+   *  面板 & Tabs
+   * ============================================================ */
+  function togglePanel(show, tab) {
+    var p = el('panel');
+    if (show === undefined) show = p.classList.contains('collapsed');
+    if (show) p.classList.remove('collapsed'); else p.classList.add('collapsed');
+    document.body.classList.toggle('panel-open', show);
+    if (tab) switchTab(tab);
+    if (show) S.touchActivity();
+  }
+
+  function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.classList.toggle('active', t.dataset.tab === name);
+    });
+    document.querySelectorAll('.tab-body').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.body === name);
+    });
+    if (name === 'tasks') renderTasks();
+    if (name === 'plan') renderPlan();
+  }
+
+  function setConnDot() {
+    var dot = el('conn-dot');
+    if (!dot) return;
+    dot.className = 'conn-dot' + (PTB.ds.hasKey() ? ' on' : ' err');
+    dot.title = PTB.ds.hasKey() ? 'DeepSeek 已连接' : '未配置 API Key';
+  }
+
+  function updateBadge() {
+    var n = Task.overdue().length + Task.todayOpen().filter(function (t) { return t.status === 'todo'; }).length;
+    PTB.pet.badge(n);
+    var sub = el('panel-sub') || {};
+    if (el('panel-sub')) el('panel-sub').textContent = (S.settings.petName || '团仔') + ' · 待办 ' + n + ' 项';
+  }
+
+  /* ============================================================
+   *  对话
+   * ============================================================ */
+  function pushMsg(role, content, id) {
+    var log = el('chat-log');
+    var d = document.createElement('div');
+    d.className = 'msg ' + (role === 'user' ? 'me' : role === 'sys' ? 'sys' : 'pet');
+    if (id) d.id = id;
+    d.textContent = content;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    return d;
+  }
+
+  function renderChat() {
+    var log = el('chat-log');
+    log.innerHTML = '';
+    S.state.chat.forEach(function (m) {
+      pushMsg(m.role === 'user' ? 'user' : m.role === 'system' ? 'sys' : 'assistant', m.content);
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function looksLikeTasks(text) {
+    if (checkinMode) return true;
+    if (/[?？]|吗|呢\b|怎么|如何|为什么|帮我看看|总结一下|分析下|分析一下/.test(text)) return false;
+    return /(点|前|截止|deadline|之前|今天|明天|后天|大后天|下周|本周|周[一二三四五六日天]|号|交|提交|完成|记得|提醒|安排|整理|写|改|发|做|准备|跟进|开会|汇报|复习|提交)/.test(text);
+  }
+
+  function handleSend(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    el('chat-input').value = '';
+    Chat.push('user', text);
+    pushMsg('user', text);
+    S.touchActivity();
+
+    if (looksLikeTasks(text)) {
+      addTasksFromText(text);
+    } else {
+      askAI(text);
+    }
+  }
+
+  function askAI(text) {
+    var id = 'ai-' + Date.now();
+    var node = pushMsg('assistant', '…', id);
+    node.classList.add('thinking');
+    if (!PTB.ds.hasKey()) {
+      node.classList.remove('thinking');
+      Chat.push('system', '(离线提示) 未配置 API Key');
+      node.textContent = '我还没连上 DeepSeek…去「设置」里填一下 API Key，我就能陪你聊了。在那之前，我依然会帮你盯着时间和任务。';
+      PTB.pet.say('还没连上 DeepSeek，先去设置里填 Key 吧～', { mood: 'worry' });
+      return;
+    }
+    PTB.pet.mood('focus');
+    var extra = '用户当前的任务清单：\n' + PTB.ds.taskDigest();
+    PTB.ds.chat(text, {
+      systemExtra: extra,
+      onToken: function (piece, whole) { node.textContent = whole; keepScroll(); },
+      max_tokens: 800
+    }).then(function (r) {
+      node.classList.remove('thinking');
+      node.textContent = r.content || '（没有返回内容）';
+      Chat.push('assistant', r.content || '');
+      keepScroll();
+      PTB.pet.say(shortly(r.content, 60), { mood: 'happy', duration: 7000 });
+      PTB.pet.idle();
+    }).catch(function (err) {
+      node.classList.remove('thinking');
+      node.textContent = '（请求失败）' + err.message;
+      PTB.pet.say('刚才没连上：' + err.message, { mood: 'worry', duration: 6000 });
+    });
+  }
+
+  function keepScroll() {
+    var log = el('chat-log');
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function shortly(s, n) {
+    s = String(s || '').replace(/\s+/g, ' ').trim();
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  /* ---------------- 自然语言 → 任务 ---------------- */
+  function addTasksFromText(text) {
+    Chat.push('system', '(正在解析待办) ' + shortly(text, 40));
+    var parsePromise;
+    if (PTB.ds.hasKey()) {
+      parsePromise = PTB.ds.parseTasks(text);
+    } else {
+      parsePromise = Promise.resolve(localParse(text));
+    }
+    parsePromise.then(function (res) {
+      var list = (res && res.tasks) || [];
+      var created = list.map(function (t) { return normalizeAndAdd(t); });
+      var reply = (res && res.reply) || ('收到，我把这些记下了：\n' + created.map(function (t) { return '· ' + t.title; }).join('\n'));
+      Chat.push('assistant', reply);
+      pushMsg('assistant', reply + '\n\n' + created.map(function (t) {
+        return '· ' + t.title + (t.deadline ? '（' + D.humanDue(t.deadline) + '截止）' : '（无期限）');
+      }).join('\n'));
+
+      rebuildPlan();
+      renderTasks();
+      if (checkinMode) finishCheckIn(created);
+      PTB.pet.say(shortly(reply, 70), {
+        mood: 'happy', duration: 9000,
+        actions: created.length ? [{ label: '看看今天怎么排', fn: function () { togglePanel(true, 'plan'); } }] : []
+      });
+      PTB.notify.send('已记下 ' + created.length + ' 项待办', created[0] ? created[0].title : '', { tag: 'ptb-add', sound: false });
+    }).catch(function (err) {
+      var msg = '没解析成功（' + err.message + '），当成闲聊问了。';
+      pushMsg('sys', msg);
+      askAI(text);
+    });
+  }
+
+  function normalizeAndAdd(raw) {
+    var t = Task.create({
+      title: raw.title || '未命名任务',
+      deadline: parseDeadline(raw.deadline),
+      estimate: Number(raw.estimate) > 0 ? Number(raw.estimate) : 30,
+      priority: ['high', 'mid', 'low'].indexOf(raw.priority) > -1 ? raw.priority : 'mid',
+      subtasks: (raw.subtasks || []).filter(Boolean).map(function (s) { return { title: s, done: false }; }),
+      source: 'ai'
+    });
+    return t;
+  }
+
+  function parseDeadline(v) {
+    if (!v) return null;
+    var m = String(v).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(m)) m += ' 18:00';
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}$/.test(m)) m = m.replace(' ', 'T');
+    var d = new Date(m);
+    if (isNaN(d.getTime())) return null;
+    if (d.getFullYear() < 2000) return null;
+    return d.toISOString();
+  }
+
+  /* 无 Key 时的本地兜底解析 */
+  function localParse(text) {
+    var src = String(text);
+    var est = 30;
+    var em = src.match(/(大概|大约|约|预计|需要|差不多|要)?\s*(\d+)\s*(个?小时|小时|分钟|分|h)/);
+    if (em) {
+      est = /小时|h/.test(em[3]) ? (+em[2]) * 60 : (+em[2]);
+      src = src.replace(em[0], '');
+    }
+    var parts = src.split(/[\n；;。]+|[，,](?=.{3,})/).map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 2; });
+    if (!parts.length) parts = [text];
+    return {
+      reply: '（离线模式）先记下来了，填上 API Key 我能拆得更细、算得更准。',
+      tasks: parts.slice(0, 8).map(function (p, i) {
+        return {
+          title: p.replace(/^(记得|帮我|需要|得|要|一定要)\s*/, '').replace(/[，,。；;、：:\-\s]+$/, '').slice(0, 40),
+          deadline: guessDeadline(p),
+          estimate: i === 0 ? est : 30,
+          priority: 'mid',
+          subtasks: []
+        };
+      })
+    };
+  }
+
+  var CN_NUM = { '零': 0, '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+  function cnNum(s) {
+    if (s == null) return NaN;
+    s = String(s).trim();
+    if (!s) return NaN;
+    if (/^\d{1,2}$/.test(s)) return +s;
+    if (s.indexOf('十') > -1) {
+      var p = s.split('十');
+      var tens = p[0] ? (CN_NUM[p[0]] || 1) : 1;
+      return tens * 10 + (p[1] ? (CN_NUM[p[1]] || 0) : 0);
+    }
+    return CN_NUM[s] !== undefined ? CN_NUM[s] : NaN;
+  }
+
+  function guessDeadline(text) {
+    var now = new Date();
+    var base = null;
+    if (/今天|今晚|今日/.test(text)) base = new Date();
+    else if (/明天|明日|明早/.test(text)) base = D.addDays(now, 1);
+    else if (/后天/.test(text)) base = D.addDays(now, 2);
+    else if (/下周/.test(text)) base = D.addDays(now, 7);
+
+    var NUM = '(\\d{1,2}|[一二三四五六七八九十两])';
+    var hm = String(text).match(new RegExp(NUM + '\\s*[:：]\\s*(\\d{2})'))
+          || String(text).match(new RegExp(NUM + '\\s*点\\s*(半|\\d{1,2}分?|[一二三四五六九十]分?)?'));
+    if (!base && !hm) return null;
+    base = base || new Date();
+
+    if (hm) {
+      var h = cnNum(hm[1]);
+      if (isNaN(h)) return null;
+      var tail = String(hm[2] || '').trim();
+      var mm = 0;
+      if (/半/.test(tail)) mm = 30;
+      else if (tail) { var n = cnNum(tail.replace('分', '')); mm = isNaN(n) ? 0 : n; }
+      if (/下午|傍晚|晚上|夜里|晚点/.test(text) && h < 12) h += 12;
+      if (/凌晨/.test(text) && h === 12) h = 0;
+      if (h > 23) h = 23;
+      base.setHours(h, mm, 0, 0);
+      if (base < now) {
+        if (/今天|今晚|今日/.test(text)) base = D.addDays(base, 1);   // 今天的时间已过就顺延到明天
+        else if (!/明天|后天|下周/.test(text)) return null;
+      }
+    } else {
+      base.setHours(18, 0, 0, 0);
+    }
+    return base ? base.toISOString() : null;
+  }
+
+  /* ============================================================
+   *  任务渲染
+   * ============================================================ */
+  function renderTasks() {
+    var wrap = el('task-groups');
+    if (!wrap) return;
+    var tasks = S.state.tasks;
+    var todayKey = D.todayKey();
+    var groups = [
+      { name: 'overdue', title: '⚠️ 已逾期', list: [] },
+      { name: 'today', title: '🔥 今天', list: [] },
+      { name: 'tomorrow', title: '🗓 明天', list: [] },
+      { name: 'later', title: '📦 以后', list: [] },
+      { name: 'nodue', title: '♾ 无期限', list: [] },
+      { name: 'done', title: '✅ 已完成', list: [] }
+    ];
+    tasks.slice().sort(function (a, b) {
+      var ad = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+      var bd = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+      return ad - bd;
+    }).forEach(function (t) {
+      if (t.status === 'done') { groups[5].list.push(t); return; }
+      if (!t.deadline) { groups[4].list.push(t); return; }
+      var diff = D.dayDiff(t.deadline);
+      if (new Date(t.deadline) < Date.now()) groups[0].list.push(t);
+      else if (diff === 0) groups[1].list.push(t);
+      else if (diff === 1) groups[2].list.push(t);
+      else groups[3].list.push(t);
+    });
+    groups[5].list = groups[5].list.slice(-12).reverse();
+
+    if (!tasks.length) {
+      wrap.innerHTML = '<div class="empty">还没有任务。<br>在上面输入框一句话丢给我，比如：<br>「明天15点前把周报发给王总，大概40分钟」</div>';
+      updateBadge();
+      return;
+    }
+    wrap.innerHTML = '';
+    groups.forEach(function (g) {
+      if (!g.list.length) return;
+      var title = document.createElement('div');
+      title.className = 'group-title';
+      title.innerHTML = g.title + ' <b>' + g.list.length + '</b>';
+      wrap.appendChild(title);
+      g.list.forEach(function (t) { wrap.appendChild(taskNode(t)); });
+    });
+    updateBadge();
+  }
+
+  function taskNode(t) {
+    var d = document.createElement('div');
+    var cls = 'task';
+    if (t.status === 'done') cls += ' done';
+    else if (t.status === 'doing') cls += ' doing';
+    else if (t.deadline && new Date(t.deadline) < Date.now()) cls += ' overdue';
+    d.className = cls;
+
+    var prioTag = t.priority === 'high' ? '<span class="m-chip hot">高优先</span>' : t.priority === 'low' ? '<span class="m-chip">低优先</span>' : '';
+    var dueTag = t.deadline
+      ? '<span class="m-chip ' + (t.status === 'done' ? 'ok' : (new Date(t.deadline) < Date.now() ? 'hot' : (D.dayDiff(t.deadline) <= 1 ? 'soon' : ''))) + '">⏰ ' + esc(D.humanDue(t.deadline)) + ' · ' + esc(D.remaining(t.deadline)) + '</span>'
+      : '<span class="m-chip">无期限</span>';
+    var planTag = t.planStart && t.status !== 'done' ? '<span class="m-chip">📌 计划 ' + esc(D.clock(t.planStart)) + '</span>' : '';
+    var progress = t.subtasks && t.subtasks.length
+      ? '<span class="m-chip">子步骤 ' + t.subtasks.filter(function (s) { return s.done; }).length + '/' + t.subtasks.length + '</span>'
+      : '';
+
+    var subs = (t.subtasks || []).map(function (s, i) {
+      return '<label class="sub ' + (s.done ? 'done' : '') + '"><input type="checkbox" data-sub="' + i + '" ' + (s.done ? 'checked' : '') + '><span>' + esc(s.title) + '</span></label>';
+    }).join('');
+
+    d.innerHTML =
+      '<div class="tick" title="标记完成">' + (t.status === 'done' ? '✓' : '') + '</div>' +
+      '<div class="t-main">' +
+        '<div class="t-title">' + esc(t.title) + '</div>' +
+        '<div class="t-meta">' + dueTag + prioTag + '<span class="m-chip">⏱ ' + (t.estimate || 30) + '分</span>' + planTag + progress + '</div>' +
+        (subs ? '<div class="sub-list">' + subs + '</div>' : '') +
+        (t.status === 'done' ? '' :
+          '<div class="t-ops">' +
+            '<button class="t-op" data-op="start">▶ 开始专注</button>' +
+            '<button class="t-op" data-op="split">🪓 帮我拆</button>' +
+            '<button class="t-op" data-op="stuck">😵 我卡住了</button>' +
+            '<button class="t-op" data-op="snooze">💤 延后1天</button>' +
+            '<button class="t-op del" data-op="del">✕</button>' +
+          '</div>') +
+      '</div>';
+
+    d.querySelector('.tick').addEventListener('click', function () {
+      Task.toggle(t.id);
+      renderTasks(); renderPlan();
+      if (t.status === 'done') {
+        PTB.pet.happy(2400);
+        PTB.pet.say('搞定「' + shortly(t.title, 18) + '」！' + cheer(), { mood: 'happy', duration: 6000 });
+      }
+    });
+
+    d.querySelectorAll('[data-sub]').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        var i = +cb.dataset.sub;
+        t.subtasks[i].done = cb.checked;
+        t.progress = Math.round(t.subtasks.filter(function (s) { return s.done; }).length / t.subtasks.length * 100);
+        if (t.status !== 'done' && cb.checked) t.status = 'doing';
+        S.save();
+        renderTasks();
+      });
+    });
+
+    d.querySelectorAll('[data-op]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        taskOp(b.dataset.op, t);
+      });
+    });
+    return d;
+  }
+
+  function cheer() {
+    var arr = ['剩下的也没那么难了 💪', '这波节奏不错，接着来。', '又清掉一件，爽。', '保持这个手感！'];
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  function taskOp(op, t) {
+    if (op === 'del') { Task.remove(t.id); renderTasks(); renderPlan(); return; }
+    if (op === 'snooze') {
+      var next = t.deadline ? new Date(new Date(t.deadline).getTime() + 86400000) : (function () { var d = D.addDays(new Date(), 1); d.setHours(18, 0, 0, 0); return d; })();
+      t.firedLeads = t.firedLeads || [];
+      t.deadline = next.toISOString();
+      S.save(); rebuildPlan(); renderTasks();
+      PTB.pet.say('「' + shortly(t.title, 14) + '」推到明天了，别再拖啦 😼', { mood: 'worry', duration: 5000 });
+      return;
+    }
+    if (op === 'start') { startFocus(t.id); return; }
+    if (op === 'split') { splitTask(t); return; }
+    if (op === 'stuck') { coachTask(t); return; }
+  }
+
+  /* ---------------- AI 拆解 ---------------- */
+  function splitTask(t) {
+    PTB.pet.say('我来把「' + shortly(t.title, 14) + '」剁碎一点…', { mood: 'focus', duration: 3000 });
+    function fallback() {
+      var steps = [
+        '打开相关文件/资料，确认到底要交付什么',
+        '写出大纲或标题清单（不追求完美）',
+        '填充第一部分内容，15 分钟倒计时',
+        '通读一遍并修正明显问题后交付'
+      ].map(function (s) { return { title: s, done: false }; });
+      t.subtasks = steps; t.status = 'doing'; t.startedAt = new Date().toISOString();
+      S.save(); renderTasks();
+      PTB.pet.say('拆好了，先做第一步就行，别看后面 👀', { mood: 'happy', duration: 7000 });
+    }
+    if (!PTB.ds.hasKey()) { fallback(); return; }
+    PTB.ds.parseTasks('任务：' + t.title + '\n说明：' + (t.note || '') + '\n请把这个任务拆成 3-5 个可在 15 分钟内完成的具体子步骤，并给出新的总耗时估计（分钟）。')
+      .then(function (res) {
+        var first = (res.tasks || [])[0];
+        if (first && first.subtasks && first.subtasks.length) {
+          t.subtasks = first.subtasks.map(function (s) { return { title: s, done: false }; });
+          if (Number(first.estimate) > 0) t.estimate = Number(first.estimate);
+        } else { t.subtasks = (res.tasks || []).map(function (x) { return { title: x.title, done: false }; }); }
+        if (!t.subtasks.length) { fallback(); return; }
+        t.status = 'doing'; t.startedAt = new Date().toISOString();
+        // 给每个子步骤设定“分钟级”小提醒
+        S.save(); renderTasks(); rebuildPlan();
+        PTB.pet.say('拆成 ' + t.subtasks.length + ' 步了，先干第一步：' + shortly(t.subtasks[0].title, 22), { mood: 'happy', duration: 9000 });
+      })
+      .catch(fallback);
+  }
+
+  /* ---------------- 卡住辅导 ---------------- */
+  function coachTask(t) {
+    t.status = 'doing'; t.startedAt = t.startedAt || new Date().toISOString(); S.save();
+    PTB.pet.say('卡住很正常，说说卡在哪，我帮你找出路。', { mood: 'worry', duration: 5000 });
+    togglePanel(true, 'chat');
+    function fallback(context) {
+      var steps = [
+        '写下这件事最终要交付的东西是什么（一句话）',
+        '找出最小的、5 分钟能做完的那一部分',
+        '设 15 分钟倒计时，只做那一部分',
+        '做完后决定：继续 15 分钟 or 换下一件事'
+      ];
+      t.subtasks = steps.map(function (s, i) { return { title: s, done: i === 0 && !!context }; });
+      S.save(); renderTasks();
+      return { reply: '卡住通常是因为目标太模糊。我们先把「完成」定义清楚，然后只做第一步。', steps: steps, question: '你现在最不确定的具体是哪一步？' };
+    }
+    function apply(res) {
+      var steps = (res.steps || []).filter(Boolean);
+      if (steps.length) {
+        t.subtasks = steps.map(function (s) { return { title: s, done: false }; });
+        t.status = 'doing';
+        S.save(); renderTasks();
+      }
+      var txt = (res.reply || '') + (steps.length ? '\n我给你排了这几步：\n' + steps.map(function (s, i) { return (i + 1) + '. ' + s; }).join('\n') : '') +
+        (res.question ? '\n\n' + res.question : '');
+      Chat.push('assistant', txt);
+      pushMsg('assistant', txt);
+      PTB.pet.say(shortly(res.reply || '我们一步一步来。', 70), { mood: 'focus', duration: 9000 });
+    }
+    if (!PTB.ds.hasKey()) { apply(fallback(false)); return; }
+    PTB.ds.coach(t.title, (PTB.store.state.chat.slice(-2).map(function (m) { return m.content; }).join(' ')) || '')
+      .then(apply)
+      .catch(function () { apply(fallback(false)); });
+  }
+
+  /* ============================================================
+   *  日程
+   * ============================================================ */
+  function rebuildPlan() {
+    PTB.scheduler.buildPlan();
+    renderPlan();
+  }
+
+  function renderPlan() {
+    var plan = S.state.plan || { blocks: [] };
+    var dateEl = el('plan-date'), sumEl = el('plan-summary'), tl = el('timeline');
+    if (!tl) return;
+    dateEl.textContent = new Date().getMonth() + 1 + '月' + new Date().getDate() + '日 · 时间轴';
+    sumEl.textContent = plan.summary || '';
+
+    var todayKey = D.todayKey();
+    var blocks = (plan.blocks || []).filter(function (b) { return b.dateKey === todayKey; });
+    if (!blocks.length) {
+      tl.innerHTML = '<div class="empty">今天还没安排。<br>添加任务后点「重新排程」，我会按截止时间帮你排。</div>';
+      return;
+    }
+    tl.innerHTML = '';
+    var lastEnd = null;
+    blocks.forEach(function (b) {
+      if (lastEnd && new Date(b.start) - new Date(lastEnd) > 45 * 60000) {
+        tl.appendChild(row(D.clock(lastEnd), [{ free: true, text: '休息 / 机动 ' + Math.round((new Date(b.start) - new Date(lastEnd)) / 60000) + ' 分钟' }]));
+      }
+      var task = Task.get(b.taskId);
+      var isNow = new Date(b.start) <= Date.now() && new Date(b.end) >= Date.now();
+      var marks = [];
+      if (task && task.priority === 'high') marks.push('🔺');
+      if (task && task.subtasks && task.subtasks.length) marks.push('子步骤 ' + task.subtasks.filter(function (x) { return x.done; }).length + '/' + task.subtasks.length);
+      tl.appendChild(row(D.clock(b.start), [{
+        text: D.clock(b.start) + '–' + D.clock(b.end) + '　' + (task ? task.title : b.title) + (marks.length ? '　' + marks.join(' ') : ''),
+        now: isNow
+      }]));
+      lastEnd = b.end;
+    });
+    tl.appendChild(row('22:00', [{ free: true, text: '之后是免打扰时间，早点收尾 🌙' }]));
+  }
+
+  function row(time, items) {
+    var r = document.createElement('div');
+    r.className = 'tl-row';
+    var left = document.createElement('div');
+    left.className = 'tl-time';
+    left.textContent = time;
+    var body = document.createElement('div');
+    body.className = 'tl-body';
+    items.forEach(function (it) {
+      var b = document.createElement('div');
+      b.className = 'tl-block' + (it.free ? ' free' : '') + (it.now ? ' now' : '');
+      b.textContent = it.text;
+      body.appendChild(b);
+    });
+    r.appendChild(left); r.appendChild(body);
+    return r;
+  }
+
+  /* ============================================================
+   *  专注计时
+   * ============================================================ */
+  function startFocus(taskId) {
+    var mins = S.settings.focusMinutes || 25;
+    focus.running = true;
+    focus.taskId = taskId || null;
+    focus.endAt = Date.now() + mins * 60000;
+    focus.left = mins * 60;
+    var t = taskId ? Task.get(taskId) : null;
+    if (t) { t.status = 'doing'; t.startedAt = t.startedAt || new Date().toISOString(); S.save(); renderTasks(); }
+    PTB.pet.mood('focus');
+    el('btn-focus').textContent = '暂停';
+    el('focus-label').textContent = '专注中：' + (t ? shortly(t.title, 20) : '自由专注');
+    PTB.pet.say('开始 ' + mins + ' 分钟专注，我陪你盯着。中途想停就停，但先别摸鱼 😼', { mood: 'focus', duration: 6000 });
+    S.touchActivity();
+    if (t) { PTB.notify.send('开始专注：' + t.title, mins + ' 分钟后提醒你休息', { tag: 'ptb-focus', sound: false }); }
+  }
+
+  function stopFocus(finished) {
+    focus.running = false;
+    el('btn-focus').textContent = '开始专注';
+    el('focus-label').textContent = '专注中：未开始';
+    el('focus-clock').textContent = D.pad(S.settings.focusMinutes || 25) + ':00';
+    PTB.pet.idle();
+    if (finished) {
+      PTB.pet.happy(3000);
+      PTB.pet.say('专注结束！起来走两步，喝口水 🚰', {
+        mood: 'happy', duration: 8000,
+        actions: [{ label: '再来一轮', fn: function () { startFocus(focus.taskId); } }]
+      });
+      PTB.notify.send('专注结束，休息一下', '5 分钟后要不要再来一轮？', { tag: 'ptb-focus-end', kind: 'normal' });
+    }
+  }
+
+  /* ============================================================
+   *  每日盘问 / 复盘
+   * ============================================================ */
+  function doCheckIn(kind) {
+    if (PTB.store.inQuietHours()) return;
+    var st = S.state.stats;
+    if (kind === 'checkin') {
+      if (st.lastCheckIn === D.todayKey()) return;
+    } else {
+      if (st.lastReview === D.todayKey()) return;
+    }
+    checkinMode = kind === 'checkin';
+    PTB.pet.alert(4000);
+    togglePanel(true, 'chat');
+
+    var act = kind === 'checkin'
+      ? [{ label: '现在就说', fn: function () { el('chat-input').focus(); } },
+         { label: '今天没什么事', ghost: true, fn: function () { checkinMode = false; S.state.stats.lastCheckIn = D.todayKey(); S.save(); PTB.pet.say('那就躺平一天，明天见 🐾', { mood: 'happy' }); } }]
+      : [{ label: '开始复盘', fn: function () { el('chat-input').focus(); } }];
+
+    var fallback = kind === 'checkin'
+      ? '早！今天有哪些事要做呀？顺口把截止时间告诉我，比如「下午三点前把方案初稿发给王总，大概40分钟」。'
+      : '晚上啦，今天做完几件？哪件事卡得最难受？明天最重要的一件是什么？';
+
+    PTB.pet.say(fallback, { mood: 'alert', duration: 14000, actions: act, speak: true });
+    Chat.push('system', kind === 'checkin' ? '（每日待办采集）' : '（晚间复盘）');
+    pushMsg('assistant', fallback);
+    PTB.notify.send(kind === 'checkin' ? '该整理今天的待办啦' : '晚上好，做个简短复盘吧', fallback, { tag: 'ptb-checkin', sticky: true });
+
+    if (PTB.ds.hasKey()) {
+      PTB.ds.greet(kind).then(function (r) {
+        if (!r.content) return;
+        pushMsg('assistant', r.content);
+        Chat.push('assistant', r.content);
+        PTB.pet.say(r.content, { mood: 'alert', duration: 14000, actions: act });
+      }).catch(function () { /* 用兜底文案 */ });
+    }
+
+    if (kind === 'checkin') S.state.stats.lastCheckIn = D.todayKey(); else S.state.stats.lastReview = D.todayKey();
+    S.save();
+  }
+
+  function finishCheckIn(created) {
+    checkinMode = false;
+    rebuildPlan();
+    var plan = S.state.plan;
+    var todayCount = (plan.blocks || []).filter(function (b) { return b.dateKey === D.todayKey(); }).length;
+    var summary = created.length
+      ? '今天我给你排了 ' + todayCount + ' 个时间块，第一件事是「' + shortly((created[0] || {}).title || '', 20) + '」。开始的时候叫我一声。'
+      : '清单暂时是空的，想到什么随时丢给我。';
+    setTimeout(function () {
+      Chat.push('assistant', summary);
+      pushMsg('assistant', summary);
+      PTB.pet.say(summary, { mood: 'happy', duration: 9000 });
+    }, 800);
+  }
+
+  /* ============================================================
+   *  主动督促（每 30 秒扫一次）
+   * ============================================================ */
+  function maybeNudge() {
+    if (!S.settings.proactive) return;
+    if (PTB.store.inQuietHours()) return;
+    var now = Date.now();
+    if (now - lastNudge < (S.settings.idleMinutes || 12) * 60000) return;
+
+    var openTasks = Task.open();
+    if (!openTasks.length) return;
+
+    var idleFor = now - (S.state.lastActivity || 0);
+    var doing = openTasks.filter(function (t) { return t.status === 'doing'; });
+    var dueToday = openTasks.filter(function (t) { return t.deadline && D.dayDiff(t.deadline) <= 0; });
+    var target = doing[0] || dueToday[0] || (PTB.scheduler.currentBlock() ? Task.get(PTB.scheduler.currentBlock().taskId) : null) || openTasks[0];
+    if (!target) return;
+
+    var idleOK = idleFor > (S.settings.idleMinutes || 12) * 60000;
+    var planStartSoon = false;
+    var nb = PTB.scheduler.nextUp();
+    if (nb && new Date(nb.start) - now < 5 * 60000) planStartSoon = true;
+
+    if (!idleOK && !planStartSoon) return;
+
+    lastNudge = now;
+    var manageable = target.subtasks && target.subtasks.length
+      ? target.subtasks.filter(function (s) { return !s.done; })[0]
+      : null;
+
+    var text;
+    if (planStartSoon && nb) {
+      text = '计划里「' + shortly(Task.get(nb.taskId) ? Task.get(nb.taskId).title : nb.title, 16) + '」马上开始了，先把手机扣过去？';
+    } else if (doing.length) {
+      text = '「' + shortly(doing[0].title, 16) + '」已经开了好一会儿，进展到哪一步了？' + (manageable ? '下一步是：' + shortly(manageable.title, 24) : '');
+    } else if (target.deadline && new Date(target.deadline) < Date.now()) {
+      text = '「' + shortly(target.title, 16) + '」已经逾期 ' + D.humanSpan(now - new Date(target.deadline)) + ' 了。要么现在做 15 分钟，要么给它一个新 deadline——别让它继续挂着。';
+    } else {
+      text = '你发呆 ' + Math.round(idleFor / 60000) + ' 分钟了。先挑最小的那件「' + shortly(target.title, 16) + '」做 10 分钟？';
+    }
+
+    PTB.pet.worry(6000);
+    PTB.pet.say(text, {
+      mood: 'worry', duration: 16000,
+      actions: [
+        { label: '做 10 分钟', fn: function () { quickFocus(target.id, 10); } },
+        { label: '帮我拆解', fn: function () { splitTask(Task.get(target.id)); } },
+        { label: '我卡住了', fn: function () { coachTask(Task.get(target.id)); } },
+        { label: '延后30分', ghost: true, fn: function () { snoozeMinutes(target.id, 30); } }
+      ]
+    });
+    PTB.notify.send('嘿，别走神', text, { tag: 'ptb-nudge', kind: 'warn' });
+  }
+
+  function quickFocus(taskId, mins) {
+    var old = S.settings.focusMinutes;
+    S.settings.focusMinutes = mins;
+    startFocus(taskId);
+    S.settings.focusMinutes = old;
+    S.save();
+  }
+
+  function snoozeMinutes(taskId, mins) {
+    var t = Task.get(taskId);
+    if (!t) return;
+    lastNudge = Date.now() - (S.settings.idleMinutes || 12) * 60000 + mins * 60000;
+    if (t.deadline) t.deadline = new Date(new Date(t.deadline).getTime() + mins * 60000).toISOString();
+    rebuildPlan();
+    PTB.pet.say(mins + ' 分钟后再来戳你，先缓口气。', { mood: 'idle', duration: 4500 });
+  }
+
+  /* ============================================================
+   *  心跳
+   * ============================================================ */
+  // 任何一段出错都不能拖垮整个心跳
+  function safeStage(name, fn) {
+    try { fn(); } catch (e) { console.error('[心跳:' + name + ']', e); }
+  }
+
+  function tick() {
+    tickCount++;
+    // 专注倒计时
+    safeStage('focus', function () {
+      if (focus.running) {
+        focus.left = Math.max(0, Math.round((focus.endAt - Date.now()) / 1000));
+        var clock = el('focus-clock');
+        if (clock) clock.textContent = D.pad(Math.floor(focus.left / 60)) + ':' + D.pad(focus.left % 60);
+        if (focus.left <= 0) stopFocus(true);
+      }
+    });
+
+    if (tickCount % 30 !== 0) return;
+
+    // 1) 每日盘问 / 复盘
+    safeStage('checkin', function () {
+      if (!S.settings.dailyCheckIn) return;
+      var nowHm = D.clock(new Date());
+      var todayKey = D.todayKey();
+      if (S.state.stats.lastCheckIn !== todayKey && nowHm >= (S.settings.wakeTime || '09:00')) doCheckIn('checkin');
+      if (S.settings.reviewTime && S.state.stats.lastReview !== todayKey && nowHm >= S.settings.reviewTime) doCheckIn('review');
+    });
+
+    // 2) 截止提醒
+    safeStage('deadlines', function () {
+      var dues = PTB.notify.checkDeadlines();
+      dues.forEach(function (item) {
+      var t = item.task;
+      if (item.lead === 0) {
+        PTB.pet.alert(5000);
+        PTB.pet.say('「' + shortly(t.title, 18) + '」现在是截止时间了，还差多少？', {
+          mood: 'alert', duration: 14000,
+          actions: [
+            { label: '做完了', fn: function () { Task.toggle(t.id); renderTasks(); } },
+            { label: '再宽限1小时', ghost: true, fn: function () { snoozeMinutes(t.id, 60); } }
+          ]
+        });
+        PTB.notify.send('⏰ 到期提醒：' + shortly(t.title, 20), '现在是截止时间，检查一下完成度。', { tag: 'due-' + t.id, kind: 'alarm', sticky: true });
+      } else if (item.lead <= 60) {
+        PTB.pet.worry(4000);
+        PTB.pet.say('「' + shortly(t.title, 18) + '」' + PTB.D.remaining(t.deadline) + '，要不要现在推一把？', {
+          mood: 'worry', duration: 11000,
+          actions: [{ label: '做 15 分钟', fn: function () { quickFocus(t.id, 15); } }, { label: '延后1天', ghost: true, fn: function () { taskOp('snooze', t); } }]
+        });
+        PTB.notify.send('⏳ ' + shortly(t.title, 18) + ' 快到期了', PTB.D.remaining(t.deadline) + '，别到时候手忙脚乱。', { tag: 'due-' + t.id, kind: 'warn' });
+      } else {
+        var lead = item.lead >= 1440 ? '明天这个点' : '还有 ' + Math.round(item.lead / 60) + ' 小时';
+        PTB.notify.send('📌 提前提醒：' + shortly(t.title, 20), '截止 ' + PTB.D.short(t.deadline) + '（' + lead + '到期）', { tag: 'duelead-' + t.id, sound: false });
+      }
+    });
+    });
+
+    // 3) 计划块到点
+    safeStage('planstart', function () {
+      var starts = PTB.notify.checkPlanStart();
+    starts.forEach(function (b) {
+      var t = Task.get(b.taskId);
+      if (!t || t.status === 'done') return;
+      PTB.pet.alert(4500);
+      PTB.pet.say('到点了：「' + shortly(t.title, 18) + '」' + (t.subtasks && t.subtasks.length ? '，先做第一步：' + shortly(t.subtasks.filter(function (s) { return !s.done; })[0] ? t.subtasks.filter(function (s) { return !s.done; })[0].title : '', 22) : '') , {
+        mood: 'alert', duration: 13000,
+        actions: [
+          { label: '开始 25 分钟', fn: function () { startFocus(t.id); } },
+          { label: '推迟20分', ghost: true, fn: function () { snoozeMinutes(t.id, 20); } }
+        ]
+      });
+      PTB.notify.send('▶ 该开始了：' + shortly(t.title, 20), '计划里这块时间是 ' + PTB.D.clock(b.start) + '–' + PTB.D.clock(b.end), { tag: 'blk-' + b.taskId + b.start, kind: 'warn' });
+    });
+    });
+
+    // 4) 发呆/卡顿督促
+    safeStage('nudge', maybeNudge);
+
+    // 5) 跨天：计划重排
+    safeStage('replan', function () {
+      if (S.state.plan.date !== D.todayKey()) rebuildPlan();
+    });
+
+    // 6) 徽标刷新
+    safeStage('badge', updateBadge);
+  }
+
+  function refreshAll() {
+    if (S.state.plan.date !== D.todayKey()) rebuildPlan();
+    updateBadge();
+  }
+
+  /* ============================================================
+   *  事件绑定
+   * ============================================================ */
+  function bindUI() {
+    el('panel-close').addEventListener('click', function () { togglePanel(false); });
+    el('pet-panel').addEventListener('click', function () {
+      PTB.notify.unlockAudio();
+      requestNotifyOnce();
+      togglePanel(el('panel').classList.contains('collapsed'), 'chat');
+    });
+    // 手机上点面板和光球以外的地方 → 收起面板
+    // 注意：用坐标判断，不能用 closest —— 按钮回调常常重绘 DOM，
+    // 冒泡到 document 时 e.target 已脱离文档树，closest 会误判成「点在外面」。
+    document.addEventListener('click', function (e) {
+      if (!isMobile()) return;
+      var p = el('panel');
+      if (p.classList.contains('collapsed')) return;
+      if (!e.clientX && !e.clientY) return;
+      function hit(sel) {
+        var n = document.querySelector(sel);
+        if (!n || n.classList.contains('hidden')) return false;
+        var r = n.getBoundingClientRect();
+        return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      }
+      if (hit('#panel') || hit('#pet-dock') || hit('#banner')) return;
+      togglePanel(false);
+    });
+    el('pet-mic').addEventListener('click', function () {
+      S.settings.voice = !S.settings.voice;
+      S.save();
+      var v = el('set-voice'); if (v) v.checked = S.settings.voice;
+      PTB.notify.toast(S.settings.voice ? '已打开语音' : '已关闭语音');
+      if (S.settings.voice) PTB.pet.say('以后我就出声提醒你啦 🔊', { mood: 'happy' });
+    });
+
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.addEventListener('click', function () { switchTab(t.dataset.tab); S.touchActivity(); });
+    });
+
+    // 对话
+    el('chat-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      handleSend(el('chat-input').value);
+    });
+    el('chat-input').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(el('chat-input').value); }
+    });
+    document.querySelectorAll('#chips .chip').forEach(function (c) {
+      c.addEventListener('click', function () {
+        var cmd = c.dataset.cmd;
+        if (cmd === 'plan') { rebuildPlan(); togglePanel(true, 'plan'); PTB.pet.say('排好了，最上面那件先做。', { mood: 'happy', duration: 6000 }); }
+        if (cmd === 'review') { handleSend('总结一下我今天的进展和最该做的事'); }
+        if (cmd === 'stuck') { handleSend('我卡住了，不知道从哪开始'); }
+        if (cmd === 'checkin') { S.state.stats.lastCheckIn = ''; S.save(); doCheckIn('checkin'); }
+      });
+    });
+
+    // 快速添加
+    el('quick-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = el('quick-input').value.trim();
+      if (!v) return;
+      el('quick-input').value = '';
+      addTasksFromText(v);
+    });
+
+    // 日程
+    el('btn-replan').addEventListener('click', function () {
+      rebuildPlan();
+      PTB.pet.say('重排完成，我把最紧急的放在前面了。', { mood: 'happy', duration: 5000 });
+    });
+    el('btn-export-ics').addEventListener('click', function () {
+      PTB.notify.downloadICS();
+      PTB.notify.toast('已导出日历文件，打开后会自动进入系统日历/闹钟');
+    });
+    el('btn-test-notify').addEventListener('click', function () {
+      requestNotifyOnce(true);
+    });
+
+    // 专注
+    el('btn-focus').addEventListener('click', function () {
+      if (focus.running) { stopFocus(false); return; }
+      var nb = PTB.scheduler.nextUp();
+      startFocus(nb ? nb.taskId : null);
+    });
+    el('btn-focus-stop').addEventListener('click', function () { stopFocus(false); });
+
+    bindSettings();
+  }
+
+  function bindPetButtons() {
+    // 双击宠物：立即汇报状态
+    var stage = el('pet-stage');
+    stage.addEventListener('dblclick', function () {
+      var nb = PTB.scheduler.nextUp();
+      var t = nb ? Task.get(nb.taskId) : null;
+      PTB.pet.say(t ? '下一件事：「' + shortly(t.title, 20) + '」，' + PTB.D.clock(nb.start) + '开始。' : '现在没排任务，要不要加一件？', { mood: 'happy', duration: 8000 });
+    });
+  }
+
+  function requestNotifyOnce(force) {
+    if (PTB.notify.permission() === 'granted') {
+      if (force) { PTB.notify.send('测试通知', '这样就能在通知栏看到我啦 🔔', { tag: 'ptb-test' }); PTB.notify.toast('通知已发出'); }
+      return;
+    }
+    PTB.notify.request().then(function (p) {
+      updateNotifyStatus();
+      if (p === 'granted' && force) PTB.notify.send('测试通知', '这样就能在通知栏看到我啦 🔔', { tag: 'ptb-test' });
+      if (p === 'denied') PTB.notify.toast('浏览器通知被拒绝，请在站点设置里打开');
+      if (p === 'unsupported') PTB.notify.toast('当前环境不支持系统通知');
+    });
+  }
+
+  function updateNotifyStatus() {
+    var p = PTB.notify.permission();
+    var map = {
+      granted: '✅ 已授权，提醒会同时出现在系统通知栏',
+      default: '⚠️ 尚未授权。点「申请通知权限」；若不弹窗，本机会自动改用页内提醒卡片 + 震动 + 声音',
+      denied: '⛔ 通知被拒绝。本机会改用页内提醒卡片 + 震动；想要系统级闹钟请在「日程」页导出 .ics 到手机日历',
+      unsupported: '当前环境不支持系统通知（手机内置浏览器常见）。已启用页内提醒卡片 + 震动 + 声音；想要真正的闹钟请用「导出 .ics」'
+    };
+    el('notify-status').textContent = map[p] || '';
+  }
+
+  function loadSettingsToForm() {
+    var s = S.settings;
+    el('set-key').value = S.apiKey() || '';
+    el('set-model').value = s.model;
+    el('set-petname').value = s.petName;
+    el('set-persona').value = s.persona;
+    el('set-voice').checked = !!s.voice;
+    el('set-waketime').value = s.wakeTime;
+    el('set-reviewtime').value = s.reviewTime || '';
+    el('set-quiet-start').value = s.quietStart;
+    el('set-quiet-end').value = s.quietEnd;
+    el('set-idle').value = s.idleMinutes;
+    el('set-focus').value = s.focusMinutes;
+    el('set-leads').value = (s.leadMinutes || []).join(',');
+    el('set-proactive').checked = !!s.proactive;
+    el('set-daily').checked = !!s.dailyCheckIn;
+    el('panel-title').textContent = s.petName || '团仔';
+    el('focus-clock').textContent = D.pad(s.focusMinutes) + ':00';
+    setApiStatus(s.apiKey ? '已配置（本地保存）' : '未配置', s.apiKey ? 'ok' : '');
+    updateNotifyStatus();
+  }
+
+  function setApiStatus(text, cls) {
+    var e = el('api-status');
+    e.textContent = text;
+    e.className = 'api-status ' + (cls || '');
+  }
+
+  function bindSettings() {
+    function bind(id, fn, saveNow) {
+      el(id).addEventListener('change', function () {
+        fn(el(id));
+        if (saveNow !== false) S.save();
+        loadSettingsToForm();
+        if (id === 'set-proactive' || id === 'set-daily') PTB.notify.toast('设置已保存');
+      });
+    }
+    bind('set-key', function (e) { S.setApiKey(e.value.trim()); setConnDot(); });
+    bind('set-model', function (e) { S.settings.model = e.value; });
+    bind('set-petname', function (e) { S.settings.petName = e.value.trim() || '团仔'; el('panel-title').textContent = S.settings.petName; });
+    bind('set-persona', function (e) { S.settings.persona = e.value; });
+    bind('set-voice', function (e) { S.settings.voice = e.checked; if (e.checked) PTB.pet.speak('我来啦'); });
+    bind('set-waketime', function (e) { S.settings.wakeTime = e.value; });
+    bind('set-reviewtime', function (e) { S.settings.reviewTime = e.value; });
+    bind('set-quiet-start', function (e) { S.settings.quietStart = e.value; });
+    bind('set-quiet-end', function (e) { S.settings.quietEnd = e.value; });
+    bind('set-idle', function (e) { S.settings.idleMinutes = Math.max(1, Math.min(180, +e.value || 12)); });
+    bind('set-focus', function (e) { S.settings.focusMinutes = Math.max(5, Math.min(180, +e.value || 25)); });
+    bind('set-leads', function (e) {
+      var arr = String(e.value).split(/[,\s，]+/).map(Number).filter(function (n) { return !isNaN(n) && n >= 0; });
+      S.settings.leadMinutes = arr.length ? arr : [0];
+    });
+    bind('set-proactive', function (e) { S.settings.proactive = e.checked; });
+    bind('set-daily', function (e) { S.settings.dailyCheckIn = e.checked; });
+
+    el('btn-eye').addEventListener('click', function () {
+      var i = el('set-key');
+      var show = i.type === 'password';
+      i.type = show ? 'text' : 'password';
+      el('btn-eye').textContent = show ? '隐藏' : '显示';
+    });
+
+    el('btn-test-api').addEventListener('click', function () {
+      if (!PTB.ds.hasKey()) { setApiStatus('请先填写 Key', 'err'); PTB.notify.toast('先填 Key 再测试'); return; }
+      setApiStatus('测试中…', '');
+      PTB.ds.test().then(function (r) {
+        setApiStatus('连接成功：' + shortly(r, 12), 'ok');
+        PTB.pet.happy(2200);
+        PTB.pet.say('连上了！现在我能帮你拆任务和解决问题啦 🎉', { mood: 'happy', duration: 6000 });
+      }).catch(function (err) {
+        setApiStatus('失败：' + err.message, 'err');
+      });
+    });
+
+    el('btn-notify-perm').addEventListener('click', function () { requestNotifyOnce(true); });
+    el('btn-checkin-now').addEventListener('click', function () {
+      S.state.stats.lastCheckIn = '';
+      S.save();
+      doCheckIn('checkin');
+    });
+
+    el('btn-export').addEventListener('click', function () {
+      var blob = new Blob([JSON.stringify(S.state, null, 2)], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = '团仔备份-' + D.todayKey() + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+    });
+
+    el('btn-import').addEventListener('click', function () { el('import-file').click(); });
+    el('import-file').addEventListener('change', function (e) {
+      var f = e.target.files[0];
+      if (!f) return;
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var obj = JSON.parse(fr.result);
+          if (!obj || typeof obj !== 'object') throw new Error('格式不对');
+          S.replaceState(obj);
+          loadSettingsToForm();
+          renderTasks(); renderChat(); rebuildPlan();
+          PTB.notify.toast('导入成功');
+        } catch (err) { PTB.notify.toast('导入失败：' + err.message); }
+      };
+      fr.readAsText(f);
+    });
+
+    el('btn-clear').addEventListener('click', function () {
+      if (!confirm('确定清空所有任务、对话和设置吗？此操作不可撤销。')) return;
+      S.reset();
+      loadSettingsToForm(); renderTasks(); renderChat(); rebuildPlan();
+      PTB.notify.toast('已清空');
+    });
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})(window.PTB);
+
+</script>
+</body>
+</html>
